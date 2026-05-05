@@ -1,0 +1,40 @@
+name: ProxyIP Scanner
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时
+  workflow_dispatch:          # 手动触发
+
+env:
+  SCAN_THREADS: 200
+  SCAN_TIMEOUT: 3
+  MAX_RESULTS: 50
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Scanner
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
+          CF_RECORD_NAME: ${{ secrets.CF_RECORD_NAME }}
+          CF_EMAIL: ${{ secrets.CF_EMAIL }}
+        run: python scanner.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxyip-results
+          path: |
+            proxyip-results.json
+            proxyip-list.txt
+          retention-days: 7
