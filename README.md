@@ -5,23 +5,24 @@
 ## 工作原理
 
 ```
-社区 ProxyIP 域名 (10+ 个)
-    ↓ 解析获取 IP
-    所有 IP 去重 (几十~上百个)
+25+ 个社区 ProxyIP 域名（分地区）
+    ↓ DoH 解析获取 IP
+    所有 IP 去重 (上百个)
     ↓ 并行测试可用性
     可用 IP 按延迟排序
     ↓ 取前 30 个
     写入 proxyip.zhaobo.org 的 A 记录 (灰色云朵)
 ```
 
-## 上游域名
+## 上游域名（25+ 个）
 
-- `proxyip.cmliussss.net` (社区主力)
-- `proxyip.us.cmliussss.net` (US 节点)
-- `proxyip.hw.090227.xyz` (备用)
-- `cdn.xn--b6gac.eu.org` (CDN 加速)
-- `cdn-all.edtunnel.ml` (edgetunnel 官方)
-- 更多...
+**CMLiussss 分地区：**
+HK / SG / JP / KR / IN / GB / FR / DE / NL / SE / FI / PL / RU / CH / LV / US / CA
+
+**其他社区：**
+- `kr.william.us.ci` / `tw.william.us.ci`
+- `proxy.xinyitang.dpdns.org`
+- `cdn.xn--b6gac.eu.org` / `cdn-all.edtunnel.ml`
 
 ## 使用
 

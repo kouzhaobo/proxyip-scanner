@@ -16,16 +16,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 社区 ProxyIP 域名列表（越多越好，互为兜底）
 UPSTREAM_DOMAINS = [
+    # CMLiussss 主域名
     "proxyip.cmliussss.net",
+    # CMLiussss 分地区
+    "proxyip.hk.cmliussss.net",
+    "proxyip.sg.cmliussss.net",
+    "proxyip.jp.cmliussss.net",
+    "proxyip.kr.cmliussss.net",
+    "proxyip.in.cmliussss.net",
+    "proxyip.gb.cmliussss.net",
+    "proxyip.fr.cmliussss.net",
+    "proxyip.de.cmliussss.net",
+    "proxyip.nl.cmliussss.net",
+    "proxyip.se.cmliussss.net",
+    "proxyip.fi.cmliussss.net",
+    "proxyip.pl.cmliussss.net",
+    "proxyip.ru.cmliussss.net",
+    "proxyip.ch.cmliussss.net",
+    "proxyip.lv.cmliussss.net",
     "proxyip.us.cmliussss.net",
+    "proxyip.ca.cmliussss.net",
+    # William
+    "kr.william.us.ci",
+    "tw.william.us.ci",
+    # 新源堂
+    "proxy.xinyitang.dpdns.org",
+    # 备用
     "proxyip.hw.090227.xyz",
     "cdn.xn--b6gac.eu.org",
     "cdn-all.edtunnel.ml",
-    "proxyip.fxxk.dedyn.io",
-    "proxyip.sg.cmliussss.net",
-    "proxyip.jp.cmliussss.net",
-    "proxyip.de.cmliussss.net",
-    "proxyip.hk.cmliussss.net",
 ]
 
 # GitHub Actions 环境变量
