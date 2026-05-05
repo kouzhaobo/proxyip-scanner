@@ -6,9 +6,10 @@ on:
   workflow_dispatch:          # 手动触发
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   SCAN_THREADS: 200
-  SCAN_TIMEOUT: 3
-  MAX_RESULTS: 50
+  SCAN_TIMEOUT: 5
+  MAX_RESULTS: 30
 
 jobs:
   scan:
