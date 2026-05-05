@@ -233,15 +233,17 @@ def update_cf_dns(results):
         print(f"[!] 获取 DNS 记录失败: {e}")
         return False
     
-    # 选择最优 IP（延迟最低的前 3 个）
-    best_ips = [r['ip'] for r in results[:3]]
+    # 选择最优 IP（延迟最低的前 N 个）
+    best_ips = [r['ip'] for r in results[:15]]
     
     if not best_ips:
         print("[!] 没有可用 IP，跳过 DNS 更新")
         return False
     
     print(f"\n[*] 更新 DNS: {full_domain}")
-    print(f"[*] 使用 IP: {', '.join(best_ips)}")
+    print(f"[*] 使用 {len(best_ips)} 个 IP:")
+    for ip in best_ips:
+        print(f"    - {ip}")
     
     # 删除旧记录
     for record in existing_records:
@@ -292,6 +294,34 @@ def save_results(results):
     
     print(f"\n[+] 结果已保存到 proxyip-results.json 和 proxyip-list.txt")
 
+def update_worker(results):
+    """更新 Cloudflare Worker 的 IP 列表"""
+    worker_url = os.environ.get('WORKER_URL')
+    worker_token = os.environ.get('WORKER_UPDATE_TOKEN')
+    
+    if not worker_url or not worker_token:
+        print("[!] 未配置 WORKER_URL 或 WORKER_UPDATE_TOKEN，跳过 Worker 更新")
+        return
+    
+    ips = [r['ip'] for r in results]
+    payload = json.dumps({'ips': ips}).encode()
+    
+    req = urllib.request.Request(
+        f"{worker_url}/update",
+        data=payload,
+        headers={
+            'Authorization': f'Bearer {worker_token}',
+            'Content-Type': 'application/json',
+        },
+        method='POST'
+    )
+    
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            print(f"[+] Worker 已更新: {data.get('count', 0)} 个 IP")
+    except Exception as e:
+        print(f"[!] Worker 更新失败: {e}")
 
 def main():
     print("=" * 60)
@@ -313,6 +343,10 @@ def main():
         print(f"    {r['ip']} - {geo['countryCode']} {geo['city']} ({geo['isp']}) - {r['latency']}ms")
     
     save_results(results)
+    
+    # 更新 Worker
+    if os.environ.get('WORKER_URL'):
+        update_worker(results)
     
     # 更新 DNS
     if os.environ.get('CF_API_TOKEN'):

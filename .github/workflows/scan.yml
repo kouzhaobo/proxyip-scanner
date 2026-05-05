@@ -28,6 +28,8 @@ jobs:
           CF_DOMAIN: ${{ secrets.CF_DOMAIN }}
           CF_RECORD_NAME: ${{ secrets.CF_RECORD_NAME }}
           CF_EMAIL: ${{ secrets.CF_EMAIL }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_UPDATE_TOKEN: ${{ secrets.WORKER_UPDATE_TOKEN }}
         run: python scanner.py
 
       - name: Upload results
