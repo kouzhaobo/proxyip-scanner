@@ -55,7 +55,7 @@ TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "30"))
 THREADS = int(os.environ.get("SCAN_THREADS", "100"))
 VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
-VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "50"))
+VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "100"))
 
 # 质量过滤阈值
 MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
