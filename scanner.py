@@ -42,6 +42,8 @@ UPSTREAM_DOMAINS = [
     "tw.william.us.ci",
     # 新源堂
     "proxy.xinyitang.dpdns.org",
+    # superhumanvssuperopen
+    "proxy.superhumanvssuperopen.dpdns.org",
     # 备用
     "proxyip.hw.090227.xyz",
     "cdn.xn--b6gac.eu.org",
@@ -50,10 +52,17 @@ UPSTREAM_DOMAINS = [
 
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "20"))
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "30"))
 THREADS = int(os.environ.get("SCAN_THREADS", "100"))
 VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
 VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "50"))
+
+# 质量过滤阈值
+MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
+MAX_JITTER = int(os.environ.get("MAX_JITTER", "100"))     # 最大抖动 ms
+
+# 优先地区（排在前面）
+PRIORITY_REGIONS = ["HK", "MO", "TW", "JP", "SG", "DE", "GB", "US"]
 
 
 def resolve_domain(domain):
@@ -276,6 +285,8 @@ def main():
     print("  ProxyIP Resolver - 多轮复验版")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验, 保留 {MAX_RESULTS} 个")
+    print(f"  质量: 延迟<={MAX_LATENCY}ms, 抖动<={MAX_JITTER}ms")
+    print(f"  优先地区: {', '.join(PRIORITY_REGIONS)}")
     print("=" * 60)
 
     # 1. 解析所有上游域名
@@ -296,26 +307,49 @@ def main():
         print("[!] 复验后无可用 IP，退出")
         sys.exit(1)
 
-    # 4. 取 top N
-    final = verified[:MAX_RESULTS]
+    # 4. 质量过滤：延迟和抖动超标直接淘汰
+    filtered = [r for r in verified if r["avg_latency"] <= MAX_LATENCY and r["jitter"] <= MAX_JITTER]
+    print(f"\n[*] 质量过滤: {len(verified)} -> {len(filtered)} (延迟<={MAX_LATENCY}ms, 抖动<={MAX_JITTER}ms)")
+    if not filtered:
+        print("[!] 质量过滤后无可用 IP，放宽标准使用全部")
+        filtered = verified
 
     # 5. 获取地理位置
-    print(f"\n[*] 最终 {len(final)} 个 IP:")
-    for r in final:
+    print(f"\n[*] 获取地理位置...")
+    for r in filtered:
         geo = get_geo_info(r["ip"])
         r["geo"] = geo
-        print(f"    {r['ip']} - {geo['countryCode']} {geo['city']} - avg {r['avg_latency']}ms jitter {r['jitter']}ms")
 
-    # 6. 保存
+    # 6. 地区优先排序：优先地区排前面，同地区按延迟排序
+    def region_priority(item):
+        code = item.get("geo", {}).get("countryCode", "ZZ")
+        try:
+            return PRIORITY_REGIONS.index(code)
+        except ValueError:
+            return len(PRIORITY_REGIONS)  # 非优先地区排后面
+
+    filtered.sort(key=lambda x: (region_priority(x), x["avg_latency"]))
+
+    # 7. 取 top N
+    final = filtered[:MAX_RESULTS]
+
+    # 8. 打印最终结果
+    print(f"\n[*] 最终 {len(final)} 个 IP:")
+    for i, r in enumerate(final):
+        geo = r["geo"]
+        priority_mark = "★" if geo["countryCode"] in PRIORITY_REGIONS else " "
+        print(f"    {priority_mark} {r['ip']} - {geo['countryCode']} {geo['city']} - avg {r['avg_latency']}ms jitter {r['jitter']}ms")
+
+    # 9. 保存
     save_results(final)
 
-    # 7. 更新 DNS
+    # 10. 更新 DNS
     if os.environ.get("CF_API_TOKEN"):
         update_cf_dns(final)
     else:
         print("\n[!] 未配置 CF_API_TOKEN，跳过 DNS 更新")
 
-    # 8. 更新 Worker（如果配置了）
+    # 11. 更新 Worker（如果配置了）
     worker_url = os.environ.get("WORKER_URL")
     worker_token = os.environ.get("WORKER_UPDATE_TOKEN")
     if worker_url and worker_token:

@@ -2,13 +2,15 @@ name: ProxyIP Scanner
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # 每3小时
+    - cron: '0 * * * *'  # 每小时
   workflow_dispatch:          # 手动触发
 
 env:
   SCAN_THREADS: 200
   SCAN_TIMEOUT: 5
-  MAX_RESULTS: 20
+  MAX_RESULTS: 30
+  MAX_LATENCY: 500
+  MAX_JITTER: 100
 
 jobs:
   scan:
