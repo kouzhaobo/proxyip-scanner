@@ -59,7 +59,6 @@ VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "50"))
 
 # 质量过滤阈值
 MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
-MAX_JITTER = int(os.environ.get("MAX_JITTER", "100"))     # 最大抖动 ms
 
 # 优先地区（排在前面）
 PRIORITY_REGIONS = ["HK", "MO", "TW", "JP", "SG", "DE", "GB", "US"]
@@ -76,7 +75,7 @@ def resolve_domain(domain):
 
 
 def test_proxyip(ip, port=443):
-    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点）"""
+    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证"""
     test_hosts = ["www.cloudflare.com", "cdnjs.cloudflare.com", "cloudflare.com"]
     test_host = random.choice(test_hosts)
     start_time = time.time()
@@ -90,7 +89,31 @@ def test_proxyip(ip, port=443):
         ctx.verify_mode = ssl.CERT_NONE
         tls_sock = ctx.wrap_socket(sock, server_hostname=test_host)
         latency = round((time.time() - start_time) * 1000)
+
+        # 发送 HTTP 请求检测人机验证
+        request = f"GET / HTTP/1.1\r\nHost: {test_host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+        tls_sock.sendall(request.encode())
+
+        # 读取响应头
+        response = b""
+        try:
+            while True:
+                chunk = tls_sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+                if b"\r\n\r\n" in response:
+                    break
+        except socket.timeout:
+            pass
+
         tls_sock.close()
+
+        # 检查 cf-mitigated: challenge（人机验证标记）
+        headers = response.decode("utf-8", errors="ignore").lower()
+        if "cf-mitigated: challenge" in headers:
+            return None  # 触发人机验证，淘汰
+
         return latency
     except Exception:
         return None
@@ -285,7 +308,7 @@ def main():
     print("  ProxyIP Resolver - 多轮复验版")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验, 保留 {MAX_RESULTS} 个")
-    print(f"  质量: 延迟<={MAX_LATENCY}ms, 抖动<={MAX_JITTER}ms")
+    print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证")
     print(f"  优先地区: {', '.join(PRIORITY_REGIONS)}")
     print("=" * 60)
 
@@ -307,9 +330,9 @@ def main():
         print("[!] 复验后无可用 IP，退出")
         sys.exit(1)
 
-    # 4. 质量过滤：延迟和抖动超标直接淘汰
-    filtered = [r for r in verified if r["avg_latency"] <= MAX_LATENCY and r["jitter"] <= MAX_JITTER]
-    print(f"\n[*] 质量过滤: {len(verified)} -> {len(filtered)} (延迟<={MAX_LATENCY}ms, 抖动<={MAX_JITTER}ms)")
+    # 4. 质量过滤：延迟超标直接淘汰
+    filtered = [r for r in verified if r["avg_latency"] <= MAX_LATENCY]
+    print(f"\n[*] 质量过滤: {len(verified)} -> {len(filtered)} (延迟<={MAX_LATENCY}ms)")
     if not filtered:
         print("[!] 质量过滤后无可用 IP，放宽标准使用全部")
         filtered = verified

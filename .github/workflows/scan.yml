@@ -10,7 +10,6 @@ env:
   SCAN_TIMEOUT: 5
   MAX_RESULTS: 30
   MAX_LATENCY: 500
-  MAX_JITTER: 100
 
 jobs:
   scan:
