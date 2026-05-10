@@ -118,10 +118,18 @@ def test_proxyip(ip, port=443):
         if "error 1034" in headers or "边缘ip受限" in headers:
             return None  # IP 被 CF 封禁，淘汰
 
-        # 检查 HTTP 状态码 403
+        # 检查 1020 错误（访问被拒绝）
+        if "error 1020" in headers or "access denied" in headers:
+            return None  # CF 防火墙拦截，淘汰
+
+        # 检查 HTTP 状态码
         status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
-        if " 403 " in status_line or " 503 " in status_line:
+        if " 403 " in status_line:
             return None  # 被拒绝访问，淘汰
+        if " 429 " in status_line:
+            return None  # 频率限制，淘汰
+        if " 503 " in status_line:
+            return None  # 服务不可用，淘汰
 
         return latency
     except Exception:
