@@ -76,7 +76,7 @@ def resolve_domain(domain):
 
 def test_proxyip(ip, port=443):
     """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证"""
-    test_hosts = ["www.cloudflare.com", "cdnjs.cloudflare.com", "cloudflare.com"]
+    test_hosts = ["dash.cloudflare.com", "www.cloudflare.com", "cdnjs.cloudflare.com", "cloudflare.com"]
     test_host = random.choice(test_hosts)
     start_time = time.time()
     sock = None
@@ -113,6 +113,15 @@ def test_proxyip(ip, port=443):
         headers = response.decode("utf-8", errors="ignore").lower()
         if "cf-mitigated: challenge" in headers:
             return None  # 触发人机验证，淘汰
+
+        # 检查 1034 错误（边缘 IP 受限）和其他 CF 错误
+        if "error 1034" in headers or "边缘ip受限" in headers:
+            return None  # IP 被 CF 封禁，淘汰
+
+        # 检查 HTTP 状态码 403
+        status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
+        if " 403 " in status_line or " 503 " in status_line:
+            return None  # 被拒绝访问，淘汰
 
         return latency
     except Exception:
