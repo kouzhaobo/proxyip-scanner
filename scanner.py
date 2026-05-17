@@ -161,10 +161,9 @@ def test_speed(ip, port=443):
     
     try:
         import socket
-        import ssl
         import time
         
-        # 测试 URL 列表
+        # 测试 URL 列表（HTTP）
         test_urls = [
             "http://speedtest.tele2.net/1MB.zip",
             "http://proof.ovh.net/files/1Mb.dat",
@@ -176,32 +175,28 @@ def test_speed(ip, port=443):
                 host = url.split("/")[2]
                 path = "/".join(url.split("/")[3:])
                 
-                # 创建 socket 连接
+                # 创建 socket 连接（HTTP，不走 TLS）
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(SPEED_TEST_TIMEOUT)
-                sock.connect((ip, port))
                 
-                # TLS 握手
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                tls_sock = ctx.wrap_socket(sock, server_hostname=host)
+                # 直接连接到目标服务器（不通过 ProxyIP）
+                sock.connect((host, 80))
                 
                 # 发送 HTTP 请求
                 request = f"GET /{path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
-                tls_sock.sendall(request.encode())
+                sock.sendall(request.encode())
                 
                 # 接收数据
                 start_time = time.time()
                 data = b""
                 while True:
-                    chunk = tls_sock.recv(4096)
+                    chunk = sock.recv(4096)
                     if not chunk:
                         break
                     data += chunk
                 
                 end_time = time.time()
-                tls_sock.close()
+                sock.close()
                 
                 # 计算速度 (Mbps)
                 # 跳过 HTTP 头
