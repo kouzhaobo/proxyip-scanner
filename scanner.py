@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ProxyIP Resolver - 解析多个社区 ProxyIP 域名，聚合可用 IP 更新 DNS
-带多轮复验，只保留稳定可靠的 IP
+带多轮复验、质量过滤、地区优先排序
 """
 
 import socket
@@ -59,6 +59,13 @@ VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "100"))
 
 # 质量过滤阈值
 MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
+# NOTE: Jitter filter removed — too aggressive from GitHub Actions (US-based).
+# Multi-round verification already eliminates unstable IPs.
+
+# 证书验证模式
+# strict: 启用完整证书验证（推荐）
+# none: 跳过证书验证（兼容旧模式）
+CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
 
 # 优先地区（排在前面）
 PRIORITY_REGIONS = ["HK", "MO", "TW", "JP", "SG", "DE", "GB", "US"]
@@ -74,9 +81,66 @@ def resolve_domain(domain):
         return []
 
 
+def check_cert_matches_domain(cert_der, expected_host):
+    """检查证书是否匹配预期域名"""
+    try:
+        import ssl as _ssl
+        cert_pem = _ssl.DER_cert_to_PEM_cert(cert_der)
+        # 使用 openssl 解析证书
+        import subprocess
+        result = subprocess.run(
+            ['openssl', 'x509', '-noout', '-subject', '-ext', 'subjectAltName'],
+            input=cert_pem.encode(),
+            capture_output=True,
+            timeout=5
+        )
+        if result.returncode != 0:
+            return True  # 解析失败，不阻止
+        
+        output = result.stdout.decode()
+        # 检查 CN 和 SAN
+        if expected_host in output:
+            return True
+        
+        # 检查通配符匹配
+        lines = output.split('\n')
+        for line in lines:
+            line = line.strip()
+            if 'DNS:' in line or 'CN =' in line or 'CN=' in line:
+                # 提取域名
+                import re
+                domains = re.findall(r'DNS:([^\s,]+)', line)
+                if not domains:
+                    cn_match = re.search(r'CN\s*=\s*([^\s,/]+)', line)
+                    if cn_match:
+                        domains = [cn_match.group(1)]
+                
+                for domain in domains:
+                    if domain == expected_host:
+                        return True
+                    # 通配符匹配
+                    if domain.startswith('*.') and expected_host.endswith(domain[1:]):
+                        return True
+                    # 通配符匹配（子域名）
+                    if domain.startswith('*.'):
+                        parent = domain[2:]
+                        parts = expected_host.split('.')
+                        if len(parts) >= 2 and '.'.join(parts[1:]) == parent:
+                            return True
+        
+        return False
+    except Exception:
+        return True  # 检查失败，不阻止
+
+
 def test_proxyip(ip, port=443):
-    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证"""
-    test_hosts = ["dash.cloudflare.com", "www.cloudflare.com", "cdnjs.cloudflare.com", "cloudflare.com"]
+    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证、1034错误和证书问题"""
+    # 支持自定义测试域名，默认使用 CF 官方站点
+    test_domains_env = os.environ.get("TEST_DOMAINS", "")
+    if test_domains_env:
+        test_hosts = [d.strip() for d in test_domains_env.split(",") if d.strip()]
+    else:
+        test_hosts = ["dash.cloudflare.com", "www.cloudflare.com", "cdnjs.cloudflare.com", "cloudflare.com"]
     test_host = random.choice(test_hosts)
     start_time = time.time()
     sock = None
@@ -84,11 +148,28 @@ def test_proxyip(ip, port=443):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(TIMEOUT)
         sock.connect((ip, port))
+        
+        # 根据配置决定证书验证模式
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        if CERT_VERIFY_MODE == "strict":
+            # 启用完整证书验证
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+        else:
+            # 兼容旧模式：跳过证书验证
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        
         tls_sock = ctx.wrap_socket(sock, server_hostname=test_host)
         latency = round((time.time() - start_time) * 1000)
+
+        # 获取证书信息进行额外检查
+        cert_der = tls_sock.getpeercert(binary_form=True)
+        if cert_der and CERT_VERIFY_MODE == "strict":
+            # 检查证书是否匹配测试域名
+            if not check_cert_matches_domain(cert_der, test_host):
+                tls_sock.close()
+                return None  # 证书不匹配，淘汰
 
         # 发送 HTTP 请求检测人机验证
         request = f"GET / HTTP/1.1\r\nHost: {test_host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
@@ -118,20 +199,15 @@ def test_proxyip(ip, port=443):
         if "error 1034" in headers or "边缘ip受限" in headers:
             return None  # IP 被 CF 封禁，淘汰
 
-        # 检查 1020 错误（访问被拒绝）
-        if "error 1020" in headers or "access denied" in headers:
-            return None  # CF 防火墙拦截，淘汰
-
-        # 检查 HTTP 状态码
+        # 检查 HTTP 状态码 403/503
         status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
-        if " 403 " in status_line:
+        if " 403 " in status_line or " 503 " in status_line:
             return None  # 被拒绝访问，淘汰
-        if " 429 " in status_line:
-            return None  # 频率限制，淘汰
-        if " 503 " in status_line:
-            return None  # 服务不可用，淘汰
 
         return latency
+    except ssl.SSLCertVerificationError:
+        # 证书验证失败
+        return None
     except Exception:
         return None
     finally:
@@ -207,7 +283,7 @@ def verify_candidates(candidates):
             ip = futures[future]
             if result:
                 verified.append(result)
-                print(f"  [✓] {ip} - avg {result['avg_latency']}ms (jitter {result['jitter']}ms) {result['rounds']}")
+                print(f"  [✓] {ip} - avg {result['avg_latency']}ms jitter {result['jitter']}ms {result['rounds']}")
             else:
                 print(f"  [✗] {ip} - 复验失败")
 
@@ -322,10 +398,11 @@ def save_results(results):
 
 def main():
     print("=" * 60)
-    print("  ProxyIP Resolver - 多轮复验版")
+    print("  ProxyIP Resolver - 多轮复验版（带证书验证）")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验, 保留 {MAX_RESULTS} 个")
-    print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证")
+    print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证, 无1034错误")
+    print(f"  证书验证: {CERT_VERIFY_MODE}")
     print(f"  优先地区: {', '.join(PRIORITY_REGIONS)}")
     print("=" * 60)
 
