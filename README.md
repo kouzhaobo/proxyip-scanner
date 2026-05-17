@@ -19,8 +19,8 @@
     所有 IP 去重 (上百个)
     ↓ 并行测试可用性 + 测速
     可用 IP 按延迟/速度排序
-    ↓ 取前 30 个
-    写入 proxyip.zhaobo.org 的 A 记录 (灰色云朵)
+    ↓ IPv4 取 20 个，IPv6 取 30 个
+    写入 proxyip.zhaobo.org 的 A/AAAA 记录 (灰色云朵)
 ```
 
 ## 上游域名（25+ 个）
@@ -59,9 +59,10 @@ GitHub Secrets：
 | `SPEED_TEST_URL` | `https://speed.cloudflare.com/__down?bytes=10485760` | 测速文件 URL |
 | `SPEED_TEST_TIMEOUT` | `30` | 测速超时（秒） |
 | `MIN_DOWNLOAD_SPEED` | `10` | 最低下载速度（Mbps） |
-| `MAX_LATENCY` | `500` | 最大延迟（ms） |
+| `MAX_LATENCY` | `300` | 最大延迟（ms） |
+| `MAX_RESULTS_V4` | `20` | IPv4 保留数量 |
+| `MAX_RESULTS_V6` | `30` | IPv6 保留数量 |
 | `VERIFY_ROUNDS` | `3` | 复验轮数 |
-| `MAX_RESULTS` | `30` | 保留 IP 数量 |
 | `TEST_DOMAINS` | CF 官方站点 | 自定义测试域名（逗号分隔） |
 
 ## 调度
@@ -71,7 +72,7 @@ GitHub Secrets：
 ## 输出示例
 
 ```
-[*] 最终 30 个 IP:
+[*] 最终 50 个 IP (IPv4: 20, IPv6: 30):
     ★ 49.238.236.28 - JP Tokyo - avg 33ms jitter 5ms speed 150.5Mbps
     ★ 150.136.254.79 - US San Jose - avg 117ms jitter 12ms speed 85.2Mbps
     ★ 2606:4700::1 (IPv6) - US San Francisco - avg 45ms jitter 8ms speed 120.3Mbps
