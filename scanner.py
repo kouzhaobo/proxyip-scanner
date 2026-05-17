@@ -50,6 +50,15 @@ UPSTREAM_DOMAINS = [
     "cdn-all.edtunnel.ml",
 ]
 
+# IPv6 专用上游域名
+UPSTREAM_DOMAINS_V6 = [
+    # 新源堂 IPv6
+    "sub.xinyitang.dpdns.org",
+    # 其他可能有 IPv6 的域名
+    "ipv6.proxyip.cmliussss.net",
+    "v6.proxyip.cmliussss.net",
+]
+
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
 MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", "20"))  # IPv4 保留数量
@@ -316,6 +325,8 @@ def resolve_all_upstreams():
     """解析所有上游域名，去重（支持 IPv4 和 IPv6）"""
     print("[*] 解析上游 ProxyIP 域名...")
     all_ips = {"ipv4": set(), "ipv6": set()}
+    
+    # 解析 IPv4 域名
     for domain in UPSTREAM_DOMAINS:
         ips = resolve_domain(domain)
         if ips["ipv4"]:
@@ -326,6 +337,20 @@ def resolve_all_upstreams():
             all_ips["ipv6"].update(ips["ipv6"])
         if not ips["ipv4"] and not ips["ipv6"]:
             print(f"  [-] {domain} -> 解析失败")
+    
+    # 解析 IPv6 专用域名
+    if ENABLE_IPV6:
+        print("\n[*] 解析 IPv6 专用域名...")
+        for domain in UPSTREAM_DOMAINS_V6:
+            ips = resolve_domain(domain)
+            if ips["ipv6"]:
+                print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
+                all_ips["ipv6"].update(ips["ipv6"])
+            if ips["ipv4"]:
+                print(f"  [+] {domain} -> IPv4: {len(ips['ipv4'])} 个")
+                all_ips["ipv4"].update(ips["ipv4"])
+            if not ips["ipv4"] and not ips["ipv6"]:
+                print(f"  [-] {domain} -> 解析失败")
     
     total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
     print(f"\n[*] 共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
