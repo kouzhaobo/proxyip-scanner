@@ -54,9 +54,20 @@ UPSTREAM_DOMAINS = [
 UPSTREAM_DOMAINS_V6 = [
     # 新源堂 IPv6
     "sub.xinyitang.dpdns.org",
-    # 其他可能有 IPv6 的域名
+    # superhumanvssuperopen IPv6
+    "proxyip-v6.superhumanvssuperopen.dpdns.org",
+    "ipv6.superhumanvssuperopen.dpdns.org",
+    "v6.superhumanvssuperopen.dpdns.org",
+    # CMLiussss IPv6
     "ipv6.proxyip.cmliussss.net",
     "v6.proxyip.cmliussss.net",
+    # Cloudflare Pages IPv6
+    "ipv6.pages.dev",
+    "v6.pages.dev",
+    # 其他 IPv6
+    "proxyip-v6.hw.090227.xyz",
+    "ipv6.proxyip.hw.090227.xyz",
+    "v6.proxyip.hw.090227.xyz",
 ]
 
 # 配置
