@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ProxyIP Resolver - 解析多个社区 ProxyIP 域名，聚合可用 IP 更新 DNS
-带多轮复验、质量过滤、地区优先排序
+带多轮复验、质量过滤、地区优先排序、证书验证、IPv6 支持、测速
 """
 
 import socket
@@ -67,18 +67,38 @@ MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
 # none: 跳过证书验证（兼容旧模式）
 CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
 
+# IPv6 支持
+ENABLE_IPV6 = os.environ.get("ENABLE_IPV6", "true").lower() == "true"
+
+# 测速配置
+ENABLE_SPEED_TEST = os.environ.get("ENABLE_SPEED_TEST", "true").lower() == "true"
+SPEED_TEST_URL = os.environ.get("SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=10485760")  # 10MB
+SPEED_TEST_TIMEOUT = int(os.environ.get("SPEED_TEST_TIMEOUT", "30"))  # 秒
+MIN_DOWNLOAD_SPEED = float(os.environ.get("MIN_DOWNLOAD_SPEED", "10"))  # Mbps
+
 # 优先地区（排在前面）
 PRIORITY_REGIONS = ["HK", "MO", "TW", "JP", "SG", "DE", "GB", "US"]
 
 
 def resolve_domain(domain):
-    """解析域名获取所有 IP"""
+    """解析域名获取所有 IP（支持 IPv4 和 IPv6）"""
+    ips = {"ipv4": [], "ipv6": []}
     try:
+        # 解析 IPv4
         results = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
-        return list(set(r[4][0] for r in results))
+        ips["ipv4"] = list(set(r[4][0] for r in results))
     except Exception as e:
-        print(f"  [!] 解析失败: {domain} - {e}")
-        return []
+        print(f"  [!] IPv4 解析失败: {domain} - {e}")
+    
+    if ENABLE_IPV6:
+        try:
+            # 解析 IPv6
+            results = socket.getaddrinfo(domain, 443, socket.AF_INET6, socket.SOCK_STREAM)
+            ips["ipv6"] = list(set(r[4][0] for r in results))
+        except Exception as e:
+            print(f"  [!] IPv6 解析失败: {domain} - {e}")
+    
+    return ips
 
 
 def check_cert_matches_domain(cert_der, expected_host):
@@ -133,7 +153,40 @@ def check_cert_matches_domain(cert_der, expected_host):
         return True  # 检查失败，不阻止
 
 
-def test_proxyip(ip, port=443):
+def test_speed(ip, port=443):
+    """测试 IP 的下载速度"""
+    if not ENABLE_SPEED_TEST:
+        return None
+    
+    try:
+        import urllib.request
+        import time
+        
+        # 构建代理 URL
+        proxy_url = f"http://{ip}:{port}"
+        proxy_handler = urllib.request.ProxyHandler({
+            'http': proxy_url,
+            'https': proxy_url
+        })
+        opener = urllib.request.build_opener(proxy_handler)
+        
+        # 测试下载速度
+        start_time = time.time()
+        response = opener.open(SPEED_TEST_URL, timeout=SPEED_TEST_TIMEOUT)
+        data = response.read()
+        end_time = time.time()
+        
+        # 计算速度 (Mbps)
+        size_mb = len(data) / (1024 * 1024)
+        duration = end_time - start_time
+        speed_mbps = (size_mb * 8) / duration
+        
+        return round(speed_mbps, 2)
+    except Exception:
+        return None
+
+
+def test_proxyip(ip, port=443, ipv6=False):
     """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证、1034错误和证书问题"""
     # 支持自定义测试域名，默认使用 CF 官方站点
     test_domains_env = os.environ.get("TEST_DOMAINS", "")
@@ -145,7 +198,12 @@ def test_proxyip(ip, port=443):
     start_time = time.time()
     sock = None
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # 根据 IP 版本创建 socket
+        if ipv6:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
         sock.settimeout(TIMEOUT)
         sock.connect((ip, port))
         
@@ -204,7 +262,10 @@ def test_proxyip(ip, port=443):
         if " 403 " in status_line or " 503 " in status_line:
             return None  # 被拒绝访问，淘汰
 
-        return latency
+        # 测试速度
+        speed = test_speed(ip, port)
+        
+        return {"latency": latency, "speed": speed, "ipv6": ipv6}
     except ssl.SSLCertVerificationError:
         # 证书验证失败
         return None
@@ -219,73 +280,109 @@ def test_proxyip(ip, port=443):
 
 
 def resolve_all_upstreams():
-    """解析所有上游域名，去重"""
+    """解析所有上游域名，去重（支持 IPv4 和 IPv6）"""
     print("[*] 解析上游 ProxyIP 域名...")
-    all_ips = set()
+    all_ips = {"ipv4": set(), "ipv6": set()}
     for domain in UPSTREAM_DOMAINS:
         ips = resolve_domain(domain)
-        if ips:
-            print(f"  [+] {domain} -> {len(ips)} 个 IP")
-            all_ips.update(ips)
-        else:
+        if ips["ipv4"]:
+            print(f"  [+] {domain} -> IPv4: {len(ips['ipv4'])} 个")
+            all_ips["ipv4"].update(ips["ipv4"])
+        if ips["ipv6"]:
+            print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
+            all_ips["ipv6"].update(ips["ipv6"])
+        if not ips["ipv4"] and not ips["ipv6"]:
             print(f"  [-] {domain} -> 解析失败")
-    print(f"\n[*] 共获取 {len(all_ips)} 个去重 IP")
-    return list(all_ips)
+    
+    total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
+    print(f"\n[*] 共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
+    return all_ips
 
 
 def initial_test(ip_list):
-    """第一轮：快速筛选可用 IP"""
-    print(f"[*] 初筛测试（{len(ip_list)} 个 IP）...")
+    """第一轮：快速筛选可用 IP（支持 IPv4 和 IPv6）"""
+    print(f"[*] 初筛测试...")
     results = []
     completed = 0
+    
+    # 准备测试任务
+    tasks = []
+    for ip in ip_list["ipv4"]:
+        tasks.append((ip, False))
+    for ip in ip_list["ipv6"]:
+        tasks.append((ip, True))
+    
+    total = len(tasks)
+    print(f"  共 {total} 个 IP 待测试")
+    
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        futures = {executor.submit(test_proxyip, ip): ip for ip in ip_list}
+        futures = {executor.submit(test_proxyip, ip, 443, ipv6): (ip, ipv6) for ip, ipv6 in tasks}
         for future in as_completed(futures):
             completed += 1
             if completed % 100 == 0:
-                print(f"  [*] 进度: {completed}/{len(ip_list)}")
-            latency = future.result()
-            if latency is not None:
-                results.append({"ip": futures[future], "latency": latency})
+                print(f"  [*] 进度: {completed}/{total}")
+            result = future.result()
+            if result:
+                ip, ipv6 = futures[future]
+                results.append({
+                    "ip": ip,
+                    "latency": result["latency"],
+                    "speed": result["speed"],
+                    "ipv6": result["ipv6"]
+                })
     results.sort(key=lambda x: x["latency"])
     print(f"[+] 初筛通过: {len(results)} 个")
     return results
 
 
-def verify_single_ip(ip):
-    """对单个 IP 做多轮复验，返回平均延迟或 None"""
+def verify_single_ip(ip, ipv6=False):
+    """对单个 IP 做多轮复验，返回平均延迟和速度或 None"""
     latencies = []
+    speeds = []
     for i in range(VERIFY_ROUNDS):
-        lat = test_proxyip(ip)
-        if lat is None:
+        result = test_proxyip(ip, 443, ipv6)
+        if result is None:
             return None  # 任何一次失败就淘汰
-        latencies.append(lat)
+        latencies.append(result["latency"])
+        if result["speed"]:
+            speeds.append(result["speed"])
         if i < VERIFY_ROUNDS - 1:
             time.sleep(0.5)  # 轮次间间隔 0.5 秒
-    avg = round(sum(latencies) / len(latencies))
+    
+    avg_latency = round(sum(latencies) / len(latencies))
     jitter = max(latencies) - min(latencies)
-    return {"ip": ip, "avg_latency": avg, "jitter": jitter, "rounds": latencies}
+    avg_speed = round(sum(speeds) / len(speeds), 2) if speeds else None
+    
+    return {
+        "ip": ip,
+        "avg_latency": avg_latency,
+        "jitter": jitter,
+        "speed": avg_speed,
+        "ipv6": ipv6,
+        "rounds": latencies
+    }
 
 
 def verify_candidates(candidates):
     """第二轮：多轮复验候选 IP"""
     count = min(len(candidates), VERIFY_CANDIDATES)
-    top_ips = [c["ip"] for c in candidates[:count]]
+    top_ips = [(c["ip"], c.get("ipv6", False)) for c in candidates[:count]]
     print(f"\n[*] 复验 top {count} 候选（每个测 {VERIFY_ROUNDS} 轮）...")
 
     verified = []
     with ThreadPoolExecutor(max_workers=min(50, count)) as executor:
-        futures = {executor.submit(verify_single_ip, ip): ip for ip in top_ips}
+        futures = {executor.submit(verify_single_ip, ip, ipv6): (ip, ipv6) for ip, ipv6 in top_ips}
         done = 0
         for future in as_completed(futures):
             done += 1
             result = future.result()
-            ip = futures[future]
+            ip, ipv6 = futures[future]
             if result:
                 verified.append(result)
-                print(f"  [✓] {ip} - avg {result['avg_latency']}ms jitter {result['jitter']}ms {result['rounds']}")
+                speed_str = f" speed {result['speed']}Mbps" if result['speed'] else ""
+                print(f"  [✓] {ip} {'(IPv6)' if ipv6 else ''} - avg {result['avg_latency']}ms jitter {result['jitter']}ms{speed_str} {result['rounds']}")
             else:
-                print(f"  [✗] {ip} - 复验失败")
+                print(f"  [✗] {ip} {'(IPv6)' if ipv6 else ''} - 复验失败")
 
     verified.sort(key=lambda x: x["avg_latency"])
     print(f"\n[+] 复验通过: {len(verified)}/{count} 个")
@@ -398,11 +495,15 @@ def save_results(results):
 
 def main():
     print("=" * 60)
-    print("  ProxyIP Resolver - 多轮复验版（带证书验证）")
+    print("  ProxyIP Resolver - 多轮复验版（带证书验证、IPv6、测速）")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验, 保留 {MAX_RESULTS} 个")
     print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证, 无1034错误")
     print(f"  证书验证: {CERT_VERIFY_MODE}")
+    print(f"  IPv6: {'启用' if ENABLE_IPV6 else '禁用'}")
+    print(f"  测速: {'启用' if ENABLE_SPEED_TEST else '禁用'}")
+    if ENABLE_SPEED_TEST:
+        print(f"  最低速度: {MIN_DOWNLOAD_SPEED}Mbps")
     print(f"  优先地区: {', '.join(PRIORITY_REGIONS)}")
     print("=" * 60)
 
@@ -431,13 +532,22 @@ def main():
         print("[!] 质量过滤后无可用 IP，放宽标准使用全部")
         filtered = verified
 
-    # 5. 获取地理位置
+    # 5. 速度过滤（如果启用）
+    if ENABLE_SPEED_TEST:
+        speed_filtered = [r for r in filtered if r.get("speed") and r["speed"] >= MIN_DOWNLOAD_SPEED]
+        if speed_filtered:
+            print(f"[*] 速度过滤: {len(filtered)} -> {len(speed_filtered)} (速度>={MIN_DOWNLOAD_SPEED}Mbps)")
+            filtered = speed_filtered
+        else:
+            print("[!] 速度过滤后无可用 IP，放宽标准使用全部")
+
+    # 6. 获取地理位置
     print(f"\n[*] 获取地理位置...")
     for r in filtered:
         geo = get_geo_info(r["ip"])
         r["geo"] = geo
 
-    # 6. 地区优先排序：优先地区排前面，同地区按延迟排序
+    # 7. 地区优先排序：优先地区排前面，同地区按延迟排序
     def region_priority(item):
         code = item.get("geo", {}).get("countryCode", "ZZ")
         try:
@@ -447,15 +557,17 @@ def main():
 
     filtered.sort(key=lambda x: (region_priority(x), x["avg_latency"]))
 
-    # 7. 取 top N
+    # 8. 取 top N
     final = filtered[:MAX_RESULTS]
 
-    # 8. 打印最终结果
+    # 9. 打印最终结果
     print(f"\n[*] 最终 {len(final)} 个 IP:")
     for i, r in enumerate(final):
         geo = r["geo"]
         priority_mark = "★" if geo["countryCode"] in PRIORITY_REGIONS else " "
-        print(f"    {priority_mark} {r['ip']} - {geo['countryCode']} {geo['city']} - avg {r['avg_latency']}ms jitter {r['jitter']}ms")
+        ipv6_mark = " (IPv6)" if r.get("ipv6") else ""
+        speed_str = f" speed {r['speed']}Mbps" if r.get("speed") else ""
+        print(f"    {priority_mark} {r['ip']}{ipv6_mark} - {geo['countryCode']} {geo['city']} - avg {r['avg_latency']}ms jitter {r['jitter']}ms{speed_str}")
 
     # 9. 保存
     save_results(final)
