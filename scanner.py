@@ -72,7 +72,7 @@ UPSTREAM_DOMAINS_V6 = [
 
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
-MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", "20"))  # IPv4 保留数量
+MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", "30"))  # IPv4 保留数量
 MAX_RESULTS_V6 = int(os.environ.get("MAX_RESULTS_V6", "30"))  # IPv6 保留数量
 THREADS = int(os.environ.get("SCAN_THREADS", "100"))
 VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
