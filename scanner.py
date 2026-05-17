@@ -89,7 +89,7 @@ MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "300"))   # 最大延迟 ms
 CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
 
 # IPv6 支持
-ENABLE_IPV6 = os.environ.get("ENABLE_IPV6", "true").lower() == "true"
+ENABLE_IPV6 = os.environ.get("ENABLE_IPV6", "false").lower() == "true"
 
 # 测速配置
 ENABLE_SPEED_TEST = os.environ.get("ENABLE_SPEED_TEST", "true").lower() == "true"
