@@ -160,29 +160,66 @@ def test_speed(ip, port=443):
         return None
     
     try:
-        import urllib.request
+        import socket
+        import ssl
         import time
         
-        # 构建代理 URL
-        proxy_url = f"http://{ip}:{port}"
-        proxy_handler = urllib.request.ProxyHandler({
-            'http': proxy_url,
-            'https': proxy_url
-        })
-        opener = urllib.request.build_opener(proxy_handler)
+        # 测试 URL 列表
+        test_urls = [
+            "http://speedtest.tele2.net/1MB.zip",
+            "http://proof.ovh.net/files/1Mb.dat",
+        ]
         
-        # 测试下载速度
-        start_time = time.time()
-        response = opener.open(SPEED_TEST_URL, timeout=SPEED_TEST_TIMEOUT)
-        data = response.read()
-        end_time = time.time()
+        for url in test_urls:
+            try:
+                # 构建代理请求
+                host = url.split("/")[2]
+                path = "/".join(url.split("/")[3:])
+                
+                # 创建 socket 连接
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(SPEED_TEST_TIMEOUT)
+                sock.connect((ip, port))
+                
+                # TLS 握手
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                tls_sock = ctx.wrap_socket(sock, server_hostname=host)
+                
+                # 发送 HTTP 请求
+                request = f"GET /{path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+                tls_sock.sendall(request.encode())
+                
+                # 接收数据
+                start_time = time.time()
+                data = b""
+                while True:
+                    chunk = tls_sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                
+                end_time = time.time()
+                tls_sock.close()
+                
+                # 计算速度 (Mbps)
+                # 跳过 HTTP 头
+                header_end = data.find(b"\r\n\r\n")
+                if header_end >= 0:
+                    body = data[header_end + 4:]
+                else:
+                    body = data
+                
+                size_mb = len(body) / (1024 * 1024)
+                duration = end_time - start_time
+                if duration > 0:
+                    speed_mbps = (size_mb * 8) / duration
+                    return round(speed_mbps, 2)
+            except Exception:
+                continue
         
-        # 计算速度 (Mbps)
-        size_mb = len(data) / (1024 * 1024)
-        duration = end_time - start_time
-        speed_mbps = (size_mb * 8) / duration
-        
-        return round(speed_mbps, 2)
+        return None
     except Exception:
         return None
 
