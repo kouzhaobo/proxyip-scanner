@@ -52,13 +52,14 @@ UPSTREAM_DOMAINS = [
 
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "30"))
+MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", "20"))  # IPv4 保留数量
+MAX_RESULTS_V6 = int(os.environ.get("MAX_RESULTS_V6", "30"))  # IPv6 保留数量
 THREADS = int(os.environ.get("SCAN_THREADS", "100"))
 VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
 VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "100"))
 
 # 质量过滤阈值
-MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
+MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "300"))   # 最大延迟 ms
 # NOTE: Jitter filter removed — too aggressive from GitHub Actions (US-based).
 # Multi-round verification already eliminates unstable IPs.
 
@@ -407,7 +408,7 @@ def get_geo_info(ip):
 
 
 def update_cf_dns(results):
-    """更新 Cloudflare DNS 记录"""
+    """更新 Cloudflare DNS 记录（支持 IPv4 和 IPv6）"""
     cf_token = os.environ.get("CF_API_TOKEN")
     cf_zone_id = os.environ.get("CF_ZONE_ID")
     cf_domain = os.environ.get("CF_DOMAIN")
@@ -427,7 +428,15 @@ def update_cf_dns(results):
     elif cf_token:
         headers["Authorization"] = f"Bearer {cf_token}"
 
-    # 获取现有记录
+    # 分离 IPv4 和 IPv6
+    ipv4_ips = [r["ip"] for r in results if not r.get("ipv6")]
+    ipv6_ips = [r["ip"] for r in results if r.get("ipv6")]
+
+    print(f"\n[*] 更新 DNS: {full_domain}")
+    print(f"    IPv4: {len(ipv4_ips)} 个")
+    print(f"    IPv6: {len(ipv6_ips)} 个")
+
+    # 删除旧的 A 记录
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?name={full_domain}&type=A"
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -435,29 +444,41 @@ def update_cf_dns(results):
             data = json.loads(resp.read())
             existing_records = data.get("result", [])
     except Exception as e:
-        print(f"[!] 获取 DNS 记录失败: {e}")
-        return False
+        print(f"[!] 获取 A 记录失败: {e}")
+        existing_records = []
 
-    best_ips = [r["ip"] for r in results[:MAX_RESULTS]]
-    if not best_ips:
-        print("[!] 没有可用 IP，跳过 DNS 更新")
-        return False
-
-    print(f"\n[*] 更新 DNS: {full_domain} ({len(best_ips)} 条)")
-
-    # 删除旧记录
     for record in existing_records:
         del_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records/{record['id']}"
         del_req = urllib.request.Request(del_url, headers=headers, method="DELETE")
         try:
             urllib.request.urlopen(del_req)
-            print(f"    删除: {record['content']}")
+            print(f"    删除 A: {record['content']}")
         except Exception as e:
             print(f"    删除失败: {e}")
 
-    # 添加新记录
+    # 删除旧的 AAAA 记录
+    url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?name={full_domain}&type=AAAA"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            existing_records = data.get("result", [])
+    except Exception as e:
+        print(f"[!] 获取 AAAA 记录失败: {e}")
+        existing_records = []
+
+    for record in existing_records:
+        del_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records/{record['id']}"
+        del_req = urllib.request.Request(del_url, headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(del_req)
+            print(f"    删除 AAAA: {record['content']}")
+        except Exception as e:
+            print(f"    删除失败: {e}")
+
+    # 添加新的 A 记录
     success_count = 0
-    for ip in best_ips:
+    for ip in ipv4_ips:
         create_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
         payload = json.dumps({
             "type": "A",
@@ -469,12 +490,30 @@ def update_cf_dns(results):
         create_req = urllib.request.Request(create_url, data=payload, headers=headers, method="POST")
         try:
             urllib.request.urlopen(create_req)
-            print(f"    添加: {full_domain} -> {ip}")
+            print(f"    添加 A: {full_domain} -> {ip}")
             success_count += 1
         except Exception as e:
             print(f"    添加失败: {e}")
 
-    print(f"\n[+] DNS 更新完成: {success_count}/{len(best_ips)}")
+    # 添加新的 AAAA 记录
+    for ip in ipv6_ips:
+        create_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
+        payload = json.dumps({
+            "type": "AAAA",
+            "name": full_domain,
+            "content": ip,
+            "ttl": 60,
+            "proxied": False,
+        }).encode()
+        create_req = urllib.request.Request(create_url, data=payload, headers=headers, method="POST")
+        try:
+            urllib.request.urlopen(create_req)
+            print(f"    添加 AAAA: {full_domain} -> {ip}")
+            success_count += 1
+        except Exception as e:
+            print(f"    添加失败: {e}")
+
+    print(f"\n[+] DNS 更新完成: {success_count}/{len(ipv4_ips) + len(ipv6_ips)}")
     return True
 
 
@@ -497,7 +536,8 @@ def main():
     print("=" * 60)
     print("  ProxyIP Resolver - 多轮复验版（带证书验证、IPv6、测速）")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
-    print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验, 保留 {MAX_RESULTS} 个")
+    print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验")
+    print(f"  保留: IPv4 {MAX_RESULTS_V4} 个, IPv6 {MAX_RESULTS_V6} 个")
     print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证, 无1034错误")
     print(f"  证书验证: {CERT_VERIFY_MODE}")
     print(f"  IPv6: {'启用' if ENABLE_IPV6 else '禁用'}")
@@ -557,11 +597,13 @@ def main():
 
     filtered.sort(key=lambda x: (region_priority(x), x["avg_latency"]))
 
-    # 8. 取 top N
-    final = filtered[:MAX_RESULTS]
+    # 8. 取 top N（IPv4 和 IPv6 分开）
+    final_v4 = [r for r in filtered if not r.get("ipv6")][:MAX_RESULTS_V4]
+    final_v6 = [r for r in filtered if r.get("ipv6")][:MAX_RESULTS_V6]
+    final = final_v4 + final_v6
 
     # 9. 打印最终结果
-    print(f"\n[*] 最终 {len(final)} 个 IP:")
+    print(f"\n[*] 最终 {len(final)} 个 IP (IPv4: {len(final_v4)}, IPv6: {len(final_v6)}):")
     for i, r in enumerate(final):
         geo = r["geo"]
         priority_mark = "★" if geo["countryCode"] in PRIORITY_REGIONS else " "
