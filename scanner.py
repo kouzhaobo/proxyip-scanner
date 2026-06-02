@@ -10,6 +10,7 @@ import time
 import json
 import sys
 import os
+import re
 import random
 import urllib.request
 import urllib.error
@@ -68,6 +69,27 @@ UPSTREAM_DOMAINS_V6 = [
     "proxyip-v6.hw.090227.xyz",
     "ipv6.proxyip.hw.090227.xyz",
     "v6.proxyip.hw.090227.xyz",
+]
+
+# ── API 数据源（来自 Senflare-IP 等社区项目）──
+API_SOURCES = [
+    # 麒麟 (Kirin)
+    "https://api.uouin.com/cloudflare.html",
+    "https://api.urlce.com/cloudflare.html",
+    # Hostmonit
+    "https://addressesapi.090227.xyz/CloudFlareYes",
+    "https://cf.090227.xyz/CloudFlareYes",
+    # VPS789
+    "https://vps789.com/openApi/cfIpTop20",
+    "https://vps789.com/openApi/cfIpApi",
+    # WeTest
+    "https://www.wetest.vip/page/cloudflare/total_v4.html",
+    # CMLiussss 分运营商
+    "https://cf.090227.xyz/cmcc",   # 中国移动
+    "https://cf.090227.xyz/ct",     # 中国电信
+    # IPDB
+    "https://ipdb.api.030101.xyz/?type=bestcf",
+    "https://ipdb.api.030101.xyz/?type=bestproxy",
 ]
 
 # 配置
@@ -368,6 +390,44 @@ def resolve_all_upstreams():
     return all_ips
 
 
+def collect_from_apis():
+    """从社区 API 数据源采集 CF IP（纯 stdlib，无第三方依赖）"""
+    print("\n[*] 从 API 数据源采集 CF IP...")
+    all_ips = {"ipv4": set(), "ipv6": set()}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,*/*",
+    }
+    for url in API_SOURCES:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+            # 提取 IPv4
+            ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', text)
+            valid = [ip for ip in ips if all(0 <= int(p) <= 255 for p in ip.split('.'))]
+            # 如果正则没匹配到，尝试逐行解析
+            if not valid:
+                for line in text.strip().split('\n'):
+                    line = line.strip()
+                    if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', line):
+                        if all(0 <= int(p) <= 255 for p in line.split('.')):
+                            valid.append(line)
+            # 提取 IPv6
+            v6s = re.findall(r'(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{1,4}', text)
+            before = len(all_ips["ipv4"])
+            all_ips["ipv4"].update(valid)
+            all_ips["ipv6"].update(v6s)
+            new = len(all_ips["ipv4"]) - before
+            print(f"  [+] {url.split('/')[2]} -> IPv4: {new} 新 / {len(valid)} 总")
+            time.sleep(0.2)
+        except Exception as e:
+            print(f"  [-] {url.split('/')[2]} -> 失败: {e}")
+    total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
+    print(f"[*] API 源共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
+    return all_ips
+
+
 def initial_test(ip_list):
     """第一轮：快速筛选可用 IP（支持 IPv4 和 IPv6）"""
     print(f"[*] 初筛测试...")
@@ -617,7 +677,15 @@ def main():
 
     # 1. 解析所有上游域名
     all_ips = resolve_all_upstreams()
-    if not all_ips:
+
+    # 1.5. 从 API 数据源采集更多 IP
+    api_ips = collect_from_apis()
+    all_ips["ipv4"].update(api_ips["ipv4"])
+    all_ips["ipv6"].update(api_ips["ipv6"])
+    total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
+    print(f"\n[*] 合并后共 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
+
+    if not all_ips["ipv4"] and not all_ips["ipv6"]:
         print("[!] 未获取到任何 IP，退出")
         sys.exit(1)
 
