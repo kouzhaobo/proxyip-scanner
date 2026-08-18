@@ -296,8 +296,9 @@ def test_proxyip(ip, port=443, ipv6=False):
         if "error 1034" in headers or "边缘ip受限" in headers:
             return None
 
+        # 检查 HTTP 异常状态码 (403/400 及 Cloudflare 5xx 错误)
         status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
-        if any(f" {code} " in status_line for code in (403, 500, 502, 503, 520)):
+        if any(f" {code} " in status_line for code in (400, 403, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526)):
             return None
 
         return {"latency": latency, "ipv6": ipv6}
