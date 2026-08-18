@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ProxyIP Resolver - 解析多个社区 ProxyIP 域名，聚合可用 IP 更新 DNS
-带多轮复验、质量过滤、地区优先排序、证书验证、IPv6 支持、测速
+带多轮复验、质量过滤、地区优先排序、证书验证、IPv6 支持、代理真实测速
 """
 
 import socket
@@ -92,22 +92,24 @@ API_SOURCES = [
     "https://ipdb.api.030101.xyz/?type=bestproxy",
 ]
 
+# 排除私有 / 保留网段 IP
+PRIVATE_IP_REGEX = re.compile(
+    r'^(?:127\.|10\.|172\.(?:1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|0\.|169\.254\.)'
+)
+
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
-MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", "30"))  # IPv4 保留数量
-MAX_RESULTS_V6 = int(os.environ.get("MAX_RESULTS_V6", "30"))  # IPv6 保留数量
+DEFAULT_MAX_RES = int(os.environ.get("MAX_RESULTS", "30"))
+MAX_RESULTS_V4 = int(os.environ.get("MAX_RESULTS_V4", str(DEFAULT_MAX_RES)))  # IPv4 保留数量
+MAX_RESULTS_V6 = int(os.environ.get("MAX_RESULTS_V6", str(DEFAULT_MAX_RES)))  # IPv6 保留数量
 THREADS = int(os.environ.get("SCAN_THREADS", "100"))
 VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
 VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "100"))
 
 # 质量过滤阈值
 MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "300"))   # 最大延迟 ms
-# NOTE: Jitter filter removed — too aggressive from GitHub Actions (US-based).
-# Multi-round verification already eliminates unstable IPs.
 
-# 证书验证模式
-# strict: 启用完整证书验证（推荐）
-# none: 跳过证书验证（兼容旧模式）
+# 证书验证模式 (strict / none)
 CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
 
 # IPv6 支持
@@ -115,8 +117,8 @@ ENABLE_IPV6 = os.environ.get("ENABLE_IPV6", "false").lower() == "true"
 
 # 测速配置
 ENABLE_SPEED_TEST = os.environ.get("ENABLE_SPEED_TEST", "true").lower() == "true"
-SPEED_TEST_URL = os.environ.get("SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=10485760")  # 10MB
-SPEED_TEST_TIMEOUT = int(os.environ.get("SPEED_TEST_TIMEOUT", "30"))  # 秒
+SPEED_TEST_HOST = os.environ.get("SPEED_TEST_HOST", "speed.cloudflare.com")
+SPEED_TEST_TIMEOUT = int(os.environ.get("SPEED_TEST_TIMEOUT", "5"))  # 秒
 MIN_DOWNLOAD_SPEED = float(os.environ.get("MIN_DOWNLOAD_SPEED", "10"))  # Mbps
 
 # 优先地区（排在前面）
@@ -127,143 +129,114 @@ def resolve_domain(domain):
     """解析域名获取所有 IP（支持 IPv4 和 IPv6）"""
     ips = {"ipv4": [], "ipv6": []}
     try:
-        # 解析 IPv4
         results = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
-        ips["ipv4"] = list(set(r[4][0] for r in results))
-    except Exception as e:
-        print(f"  [!] IPv4 解析失败: {domain} - {e}")
+        ips["ipv4"] = list(set(str(r[4][0]) for r in results if not PRIVATE_IP_REGEX.match(str(r[4][0]))))
+    except Exception:
+        pass
     
     if ENABLE_IPV6:
         try:
-            # 解析 IPv6
             results = socket.getaddrinfo(domain, 443, socket.AF_INET6, socket.SOCK_STREAM)
-            ips["ipv6"] = list(set(r[4][0] for r in results))
-        except Exception as e:
-            print(f"  [!] IPv6 解析失败: {domain} - {e}")
+            ips["ipv6"] = list(set(str(r[4][0]) for r in results))
+        except Exception:
+            pass
     
     return ips
 
 
-def check_cert_matches_domain(cert_der, expected_host):
-    """检查证书是否匹配预期域名"""
+def check_cert_matches_domain(tls_sock, expected_host):
+    """检查 TLS 证书 SAN/CN 是否匹配预期域名（纯 Python 解析，零子进程开销）"""
     try:
-        import ssl as _ssl
-        cert_pem = _ssl.DER_cert_to_PEM_cert(cert_der)
-        # 使用 openssl 解析证书
-        import subprocess
-        result = subprocess.run(
-            ['openssl', 'x509', '-noout', '-subject', '-ext', 'subjectAltName'],
-            input=cert_pem.encode(),
-            capture_output=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            return True  # 解析失败，不阻止
-        
-        output = result.stdout.decode()
-        # 检查 CN 和 SAN
-        if expected_host in output:
+        cert = tls_sock.getpeercert()
+        if not cert:
             return True
-        
-        # 检查通配符匹配
-        lines = output.split('\n')
-        for line in lines:
-            line = line.strip()
-            if 'DNS:' in line or 'CN =' in line or 'CN=' in line:
-                # 提取域名
-                import re
-                domains = re.findall(r'DNS:([^\s,]+)', line)
-                if not domains:
-                    cn_match = re.search(r'CN\s*=\s*([^\s,/]+)', line)
-                    if cn_match:
-                        domains = [cn_match.group(1)]
-                
-                for domain in domains:
-                    if domain == expected_host:
-                        return True
-                    # 通配符匹配
-                    if domain.startswith('*.') and expected_host.endswith(domain[1:]):
-                        return True
-                    # 通配符匹配（子域名）
-                    if domain.startswith('*.'):
-                        parent = domain[2:]
-                        parts = expected_host.split('.')
-                        if len(parts) >= 2 and '.'.join(parts[1:]) == parent:
-                            return True
-        
+        domains = []
+        for item in cert.get('subjectAltName', ()):
+            if item[0] == 'DNS':
+                domains.append(item[1])
+        if not domains:
+            for item in cert.get('subject', ()):
+                for k, v in item:
+                    if k == 'commonName':
+                        domains.append(v)
+        for domain in domains:
+            if domain == expected_host:
+                return True
+            if domain.startswith('*.') and expected_host.endswith(domain[1:]):
+                return True
+            if domain.startswith('*.'):
+                parent = domain[2:]
+                parts = expected_host.split('.')
+                if len(parts) >= 2 and '.'.join(parts[1:]) == parent:
+                    return True
         return False
     except Exception:
-        return True  # 检查失败，不阻止
+        return True
 
 
-def test_speed(ip, port=443):
-    """测试 IP 的下载速度"""
+def test_speed(ip, port=443, ipv6=False):
+    """通过代理目标 IP 进行实际 TLS/HTTP 下载测速 (Mbps)"""
     if not ENABLE_SPEED_TEST:
         return None
     
+    host = SPEED_TEST_HOST
+    path = "/__down?bytes=1048576"  # 1MB
+    
+    sock = None
     try:
-        import socket
-        import time
+        if ipv6:
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         
-        # 测试 URL 列表（HTTP）
-        test_urls = [
-            "http://speedtest.tele2.net/1MB.zip",
-            "http://proof.ovh.net/files/1Mb.dat",
-        ]
+        sock.settimeout(SPEED_TEST_TIMEOUT)
+        sock.connect((ip, port))
         
-        for url in test_urls:
-            try:
-                # 构建代理请求
-                host = url.split("/")[2]
-                path = "/".join(url.split("/")[3:])
-                
-                # 创建 socket 连接（HTTP，不走 TLS）
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(SPEED_TEST_TIMEOUT)
-                
-                # 直接连接到目标服务器（不通过 ProxyIP）
-                sock.connect((host, 80))
-                
-                # 发送 HTTP 请求
-                request = f"GET /{path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
-                sock.sendall(request.encode())
-                
-                # 接收数据
-                start_time = time.time()
-                data = b""
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                
-                end_time = time.time()
-                sock.close()
-                
-                # 计算速度 (Mbps)
-                # 跳过 HTTP 头
-                header_end = data.find(b"\r\n\r\n")
-                if header_end >= 0:
-                    body = data[header_end + 4:]
-                else:
-                    body = data
-                
-                size_mb = len(body) / (1024 * 1024)
-                duration = end_time - start_time
-                if duration > 0:
-                    speed_mbps = (size_mb * 8) / duration
-                    return round(speed_mbps, 2)
-            except Exception:
-                continue
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        tls_sock = ctx.wrap_socket(sock, server_hostname=host)
         
+        req = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+        tls_sock.sendall(req.encode())
+        
+        res = b""
+        header_found = False
+        body_len = 0
+        t0 = time.time()
+        while True:
+            chunk = tls_sock.recv(32768)
+            if not chunk:
+                break
+            if not header_found:
+                res += chunk
+                idx = res.find(b"\r\n\r\n")
+                if idx != -1:
+                    header_found = True
+                    body_len += len(res[idx+4:])
+            else:
+                body_len += len(chunk)
+            if time.time() - t0 > SPEED_TEST_TIMEOUT:
+                break
+        t1 = time.time()
+        tls_sock.close()
+        
+        duration = t1 - t0
+        if duration > 0 and body_len > 0:
+            speed_mbps = round((body_len * 8) / (duration * 1000000), 2)
+            return speed_mbps
         return None
     except Exception:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
         return None
 
 
 def test_proxyip(ip, port=443, ipv6=False):
-    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），同时检测人机验证、1034错误和证书问题"""
-    # 支持自定义测试域名，默认使用 CF 官方站点
+    """测试 IP 是否可用作 ProxyIP（TLS 握手到 CF 站点），检测人机验证、1034 错误和状态码"""
     test_domains_env = os.environ.get("TEST_DOMAINS", "")
     if test_domains_env:
         test_hosts = [d.strip() for d in test_domains_env.split(",") if d.strip()]
@@ -273,7 +246,6 @@ def test_proxyip(ip, port=443, ipv6=False):
     start_time = time.time()
     sock = None
     try:
-        # 根据 IP 版本创建 socket
         if ipv6:
             sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         else:
@@ -282,33 +254,27 @@ def test_proxyip(ip, port=443, ipv6=False):
         sock.settimeout(TIMEOUT)
         sock.connect((ip, port))
         
-        # 根据配置决定证书验证模式
         ctx = ssl.create_default_context()
         if CERT_VERIFY_MODE == "strict":
-            # 启用完整证书验证
             ctx.check_hostname = True
             ctx.verify_mode = ssl.CERT_REQUIRED
         else:
-            # 兼容旧模式：跳过证书验证
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         
         tls_sock = ctx.wrap_socket(sock, server_hostname=test_host)
         latency = round((time.time() - start_time) * 1000)
 
-        # 获取证书信息进行额外检查
-        cert_der = tls_sock.getpeercert(binary_form=True)
-        if cert_der and CERT_VERIFY_MODE == "strict":
-            # 检查证书是否匹配测试域名
-            if not check_cert_matches_domain(cert_der, test_host):
+        # 检查证书匹配
+        if CERT_VERIFY_MODE == "strict":
+            if not check_cert_matches_domain(tls_sock, test_host):
                 tls_sock.close()
-                return None  # 证书不匹配，淘汰
+                return None
 
-        # 发送 HTTP 请求检测人机验证
+        # 发送 HTTP 请求测试
         request = f"GET / HTTP/1.1\r\nHost: {test_host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
         tls_sock.sendall(request.encode())
 
-        # 读取响应头
         response = b""
         try:
             while True:
@@ -323,26 +289,19 @@ def test_proxyip(ip, port=443, ipv6=False):
 
         tls_sock.close()
 
-        # 检查 cf-mitigated: challenge（人机验证标记）
         headers = response.decode("utf-8", errors="ignore").lower()
         if "cf-mitigated: challenge" in headers:
-            return None  # 触发人机验证，淘汰
+            return None
 
-        # 检查 1034 错误（边缘 IP 受限）和其他 CF 错误
         if "error 1034" in headers or "边缘ip受限" in headers:
-            return None  # IP 被 CF 封禁，淘汰
+            return None
 
-        # 检查 HTTP 状态码 403/503
         status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
-        if " 403 " in status_line or " 503 " in status_line:
-            return None  # 被拒绝访问，淘汰
+        if any(f" {code} " in status_line for code in (403, 500, 502, 503, 520)):
+            return None
 
-        # 测试速度
-        speed = test_speed(ip, port)
-        
-        return {"latency": latency, "speed": speed, "ipv6": ipv6}
+        return {"latency": latency, "ipv6": ipv6}
     except ssl.SSLCertVerificationError:
-        # 证书验证失败
         return None
     except Exception:
         return None
@@ -355,35 +314,30 @@ def test_proxyip(ip, port=443, ipv6=False):
 
 
 def resolve_all_upstreams():
-    """解析所有上游域名，去重（支持 IPv4 和 IPv6）"""
-    print("[*] 解析上游 ProxyIP 域名...")
+    """并发解析所有上游域名，去重（支持 IPv4 和 IPv6）"""
+    print("[*] 并发解析上游 ProxyIP 域名...")
     all_ips = {"ipv4": set(), "ipv6": set()}
     
-    # 解析 IPv4 域名
-    for domain in UPSTREAM_DOMAINS:
-        ips = resolve_domain(domain)
-        if ips["ipv4"]:
-            print(f"  [+] {domain} -> IPv4: {len(ips['ipv4'])} 个")
-            all_ips["ipv4"].update(ips["ipv4"])
-        if ips["ipv6"]:
-            print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
-            all_ips["ipv6"].update(ips["ipv6"])
-        if not ips["ipv4"] and not ips["ipv6"]:
-            print(f"  [-] {domain} -> 解析失败")
-    
-    # 解析 IPv6 专用域名
+    domains_to_resolve = list(UPSTREAM_DOMAINS)
     if ENABLE_IPV6:
-        print("\n[*] 解析 IPv6 专用域名...")
-        for domain in UPSTREAM_DOMAINS_V6:
-            ips = resolve_domain(domain)
-            if ips["ipv6"]:
-                print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
-                all_ips["ipv6"].update(ips["ipv6"])
-            if ips["ipv4"]:
-                print(f"  [+] {domain} -> IPv4: {len(ips['ipv4'])} 个")
-                all_ips["ipv4"].update(ips["ipv4"])
-            if not ips["ipv4"] and not ips["ipv6"]:
-                print(f"  [-] {domain} -> 解析失败")
+        domains_to_resolve.extend(UPSTREAM_DOMAINS_V6)
+    
+    with ThreadPoolExecutor(max_workers=min(20, len(domains_to_resolve))) as executor:
+        futures = {executor.submit(resolve_domain, domain): domain for domain in domains_to_resolve}
+        for future in as_completed(futures):
+            domain = futures[future]
+            try:
+                ips = future.result()
+                if ips["ipv4"]:
+                    print(f"  [+] {domain} -> IPv4: {len(ips['ipv4'])} 个")
+                    all_ips["ipv4"].update(ips["ipv4"])
+                if ips["ipv6"]:
+                    print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
+                    all_ips["ipv6"].update(ips["ipv6"])
+                if not ips["ipv4"] and not ips["ipv6"]:
+                    print(f"  [-] {domain} -> 解析无结果")
+            except Exception as e:
+                print(f"  [-] {domain} -> 解析出错: {e}")
     
     total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
     print(f"\n[*] 共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
@@ -391,7 +345,7 @@ def resolve_all_upstreams():
 
 
 def collect_from_apis():
-    """从社区 API 数据源采集 CF IP（纯 stdlib，无第三方依赖）"""
+    """从社区 API 数据源采集 CF IP（纯 stdlib，带私有网段过滤）"""
     print("\n[*] 从 API 数据源采集 CF IP...")
     all_ips = {"ipv4": set(), "ipv6": set()}
     headers = {
@@ -403,24 +357,24 @@ def collect_from_apis():
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 text = resp.read().decode("utf-8", errors="ignore")
-            # 提取 IPv4
+            
             ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', text)
-            valid = [ip for ip in ips if all(0 <= int(p) <= 255 for p in ip.split('.'))]
-            # 如果正则没匹配到，尝试逐行解析
+            valid = [ip for ip in ips if all(0 <= int(p) <= 255 for p in ip.split('.')) and not PRIVATE_IP_REGEX.match(ip)]
+            
             if not valid:
                 for line in text.strip().split('\n'):
                     line = line.strip()
                     if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', line):
-                        if all(0 <= int(p) <= 255 for p in line.split('.')):
+                        if all(0 <= int(p) <= 255 for p in line.split('.')) and not PRIVATE_IP_REGEX.match(line):
                             valid.append(line)
-            # 提取 IPv6
+            
             v6s = re.findall(r'(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{1,4}', text)
             before = len(all_ips["ipv4"])
             all_ips["ipv4"].update(valid)
             all_ips["ipv6"].update(v6s)
             new = len(all_ips["ipv4"]) - before
             print(f"  [+] {url.split('/')[2]} -> IPv4: {new} 新 / {len(valid)} 总")
-            time.sleep(0.2)
+            time.sleep(0.1)
         except Exception as e:
             print(f"  [-] {url.split('/')[2]} -> 失败: {e}")
     total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
@@ -429,12 +383,11 @@ def collect_from_apis():
 
 
 def initial_test(ip_list):
-    """第一轮：快速筛选可用 IP（支持 IPv4 和 IPv6）"""
+    """第一轮：快速筛选可用 IP"""
     print(f"[*] 初筛测试...")
     results = []
     completed = 0
     
-    # 准备测试任务
     tasks = []
     for ip in ip_list["ipv4"]:
         tasks.append((ip, False))
@@ -448,7 +401,7 @@ def initial_test(ip_list):
         futures = {executor.submit(test_proxyip, ip, 443, ipv6): (ip, ipv6) for ip, ipv6 in tasks}
         for future in as_completed(futures):
             completed += 1
-            if completed % 100 == 0:
+            if completed % 200 == 0 or completed == total:
                 print(f"  [*] 进度: {completed}/{total}")
             result = future.result()
             if result:
@@ -456,7 +409,6 @@ def initial_test(ip_list):
                 results.append({
                     "ip": ip,
                     "latency": result["latency"],
-                    "speed": result["speed"],
                     "ipv6": result["ipv6"]
                 })
     results.sort(key=lambda x: x["latency"])
@@ -465,28 +417,23 @@ def initial_test(ip_list):
 
 
 def verify_single_ip(ip, ipv6=False):
-    """对单个 IP 做多轮复验，返回平均延迟和速度或 None"""
+    """对单个 IP 做多轮复验"""
     latencies = []
-    speeds = []
     for i in range(VERIFY_ROUNDS):
         result = test_proxyip(ip, 443, ipv6)
         if result is None:
-            return None  # 任何一次失败就淘汰
+            return None
         latencies.append(result["latency"])
-        if result["speed"]:
-            speeds.append(result["speed"])
         if i < VERIFY_ROUNDS - 1:
-            time.sleep(0.5)  # 轮次间间隔 0.5 秒
+            time.sleep(0.2)
     
     avg_latency = round(sum(latencies) / len(latencies))
     jitter = max(latencies) - min(latencies)
-    avg_speed = round(sum(speeds) / len(speeds), 2) if speeds else None
     
     return {
         "ip": ip,
         "avg_latency": avg_latency,
         "jitter": jitter,
-        "speed": avg_speed,
         "ipv6": ipv6,
         "rounds": latencies
     }
@@ -501,15 +448,12 @@ def verify_candidates(candidates):
     verified = []
     with ThreadPoolExecutor(max_workers=min(50, count)) as executor:
         futures = {executor.submit(verify_single_ip, ip, ipv6): (ip, ipv6) for ip, ipv6 in top_ips}
-        done = 0
         for future in as_completed(futures):
-            done += 1
             result = future.result()
             ip, ipv6 = futures[future]
             if result:
                 verified.append(result)
-                speed_str = f" speed {result['speed']}Mbps" if result['speed'] else ""
-                print(f"  [✓] {ip} {'(IPv6)' if ipv6 else ''} - avg {result['avg_latency']}ms jitter {result['jitter']}ms{speed_str} {result['rounds']}")
+                print(f"  [✓] {ip} {'(IPv6)' if ipv6 else ''} - avg {result['avg_latency']}ms jitter {result['jitter']}ms {result['rounds']}")
             else:
                 print(f"  [✗] {ip} {'(IPv6)' if ipv6 else ''} - 复验失败")
 
@@ -518,25 +462,36 @@ def verify_candidates(candidates):
     return verified
 
 
+GEO_CACHE = {}
+
 def get_geo_info(ip):
     """获取 IP 地理位置"""
+    if ip in GEO_CACHE:
+        return GEO_CACHE[ip]
+    
+    url = f"http://ip-api.com/json/{ip}?fields=country,countryCode,city,isp"
     try:
-        url = f"http://ip-api.com/json/{ip}?fields=country,countryCode,city,isp"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-            return {
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            info = {
                 "country": data.get("country", "Unknown"),
                 "countryCode": data.get("countryCode", "??"),
                 "city": data.get("city", "Unknown"),
                 "isp": data.get("isp", "Unknown"),
             }
+            GEO_CACHE[ip] = info
+            return info
     except Exception:
-        return {"country": "Unknown", "countryCode": "??", "city": "Unknown", "isp": "Unknown"}
+        pass
+            
+    default_info = {"country": "Unknown", "countryCode": "??", "city": "Unknown", "isp": "Unknown"}
+    GEO_CACHE[ip] = default_info
+    return default_info
 
 
 def update_cf_dns(results):
-    """更新 Cloudflare DNS 记录（支持 IPv4 和 IPv6）"""
+    """更新 Cloudflare DNS 记录"""
     cf_token = os.environ.get("CF_API_TOKEN")
     cf_zone_id = os.environ.get("CF_ZONE_ID")
     cf_domain = os.environ.get("CF_DOMAIN")
@@ -556,7 +511,6 @@ def update_cf_dns(results):
     elif cf_token:
         headers["Authorization"] = f"Bearer {cf_token}"
 
-    # 分离 IPv4 和 IPv6
     ipv4_ips = [r["ip"] for r in results if not r.get("ipv6")]
     ipv6_ips = [r["ip"] for r in results if r.get("ipv6")]
 
@@ -564,7 +518,6 @@ def update_cf_dns(results):
     print(f"    IPv4: {len(ipv4_ips)} 个")
     print(f"    IPv6: {len(ipv6_ips)} 个")
 
-    # 删除旧的 A 记录
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?name={full_domain}&type=A"
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -584,7 +537,6 @@ def update_cf_dns(results):
         except Exception as e:
             print(f"    删除失败: {e}")
 
-    # 删除旧的 AAAA 记录
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?name={full_domain}&type=AAAA"
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -604,7 +556,6 @@ def update_cf_dns(results):
         except Exception as e:
             print(f"    删除失败: {e}")
 
-    # 添加新的 A 记录
     success_count = 0
     for ip in ipv4_ips:
         create_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
@@ -623,7 +574,6 @@ def update_cf_dns(results):
         except Exception as e:
             print(f"    添加失败: {e}")
 
-    # 添加新的 AAAA 记录
     for ip in ipv6_ips:
         create_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
         payload = json.dumps({
@@ -662,11 +612,11 @@ def save_results(results):
 
 def main():
     print("=" * 60)
-    print("  ProxyIP Resolver - 多轮复验版（带证书验证、IPv6、测速）")
+    print("  ProxyIP Resolver - 高效极速版（含真实下载测速、纯 Python 证书验证、GeoIP 控频）")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验")
     print(f"  保留: IPv4 {MAX_RESULTS_V4} 个, IPv6 {MAX_RESULTS_V6} 个")
-    print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证, 无1034错误")
+    print(f"  质量: 延迟<={MAX_LATENCY}ms, 无人机验证, 无 1034 / 状态码错误")
     print(f"  证书验证: {CERT_VERIFY_MODE}")
     print(f"  IPv6: {'启用' if ENABLE_IPV6 else '禁用'}")
     print(f"  测速: {'启用' if ENABLE_SPEED_TEST else '禁用'}")
@@ -708,20 +658,45 @@ def main():
         print("[!] 质量过滤后无可用 IP，放宽标准使用全部")
         filtered = verified
 
-    # 5. 速度过滤（如果启用）
+    # 5. 针对高质量前 N 个候选 IP 做真实 ProxyIP 下载测速
     if ENABLE_SPEED_TEST:
-        speed_filtered = [r for r in filtered if r.get("speed") and r["speed"] >= MIN_DOWNLOAD_SPEED]
-        if speed_filtered:
-            print(f"[*] 速度过滤: {len(filtered)} -> {len(speed_filtered)} (速度>={MIN_DOWNLOAD_SPEED}Mbps)")
-            filtered = speed_filtered
-        else:
-            print("[!] 速度过滤后无可用 IP，放宽标准使用全部")
+        test_candidates = filtered[:30]
+        print(f"\n[*] 开始对 top {len(test_candidates)} 候选 IP 做 ProxyIP 实际代理下载测速 (目标 >= {MIN_DOWNLOAD_SPEED}Mbps)...")
+        speed_tested = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(test_speed, r["ip"], 443, r.get("ipv6", False)): r for r in test_candidates}
+            for future in as_completed(futures):
+                item = futures[future]
+                speed = future.result()
+                item["speed"] = speed
+                if speed:
+                    print(f"  [+] {item['ip']} 测速结果: {speed} Mbps")
+                    speed_tested.append(item)
+                else:
+                    print(f"  [-] {item['ip']} 测速超时或无响应")
 
-    # 6. 获取地理位置
-    print(f"\n[*] 获取地理位置...")
-    for r in filtered:
-        geo = get_geo_info(r["ip"])
-        r["geo"] = geo
+        # 合并已测速和未测速的高质量列表
+        speed_filtered = [r for r in speed_tested if r.get("speed") and r["speed"] >= MIN_DOWNLOAD_SPEED]
+        if speed_filtered:
+            print(f"[*] 速度过滤: {len(test_candidates)} -> {len(speed_filtered)} (速度>={MIN_DOWNLOAD_SPEED}Mbps)")
+            # 补全后续不需要测速的优秀 IP 备用
+            remaining = [r for r in filtered if r not in test_candidates]
+            filtered = speed_filtered + remaining
+        elif speed_tested:
+            print("[!] 满足最低速阈值的 IP 较少，使用所有测速成功的 IP")
+            remaining = [r for r in filtered if r not in test_candidates]
+            filtered = speed_tested + remaining
+        else:
+            print("[!] 测速未完成或接口限制，保留基于延迟的可用 IP")
+
+    # 6. 只对最终选出的前 N 个候选 IP 获取地理位置（精细风控，防止触发 API 限流）
+    top_candidates = filtered[:(MAX_RESULTS_V4 + MAX_RESULTS_V6)]
+    print(f"\n[*] 并发获取 {len(top_candidates)} 个精选 IP 的地理位置...")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(get_geo_info, r["ip"]): r for r in top_candidates}
+        for future in as_completed(futures):
+            item = futures[future]
+            item["geo"] = future.result()
 
     # 7. 地区优先排序：优先地区排前面，同地区按延迟排序
     def region_priority(item):
@@ -729,34 +704,36 @@ def main():
         try:
             return PRIORITY_REGIONS.index(code)
         except ValueError:
-            return len(PRIORITY_REGIONS)  # 非优先地区排后面
+            return len(PRIORITY_REGIONS)
 
-    filtered.sort(key=lambda x: (region_priority(x), x["avg_latency"]))
+    top_candidates.sort(key=lambda x: (region_priority(x), x["avg_latency"]))
 
     # 8. 取 top N（IPv4 和 IPv6 分开）
-    final_v4 = [r for r in filtered if not r.get("ipv6")][:MAX_RESULTS_V4]
-    final_v6 = [r for r in filtered if r.get("ipv6")][:MAX_RESULTS_V6]
+    final_v4 = [r for r in top_candidates if not r.get("ipv6")][:MAX_RESULTS_V4]
+    final_v6 = [r for r in top_candidates if r.get("ipv6")][:MAX_RESULTS_V6]
     final = final_v4 + final_v6
 
     # 9. 打印最终结果
     print(f"\n[*] 最终 {len(final)} 个 IP (IPv4: {len(final_v4)}, IPv6: {len(final_v6)}):")
     for i, r in enumerate(final):
-        geo = r["geo"]
-        priority_mark = "★" if geo["countryCode"] in PRIORITY_REGIONS else " "
+        geo = r.get("geo", {})
+        country_code = geo.get("countryCode", "??")
+        city = geo.get("city", "Unknown")
+        priority_mark = "★" if country_code in PRIORITY_REGIONS else " "
         ipv6_mark = " (IPv6)" if r.get("ipv6") else ""
         speed_str = f" speed {r['speed']}Mbps" if r.get("speed") else ""
-        print(f"    {priority_mark} {r['ip']}{ipv6_mark} - {geo['countryCode']} {geo['city']} - avg {r['avg_latency']}ms jitter {r['jitter']}ms{speed_str}")
+        print(f"    {priority_mark} {r['ip']}{ipv6_mark} - {country_code} {city} - avg {r['avg_latency']}ms jitter {r['jitter']}ms{speed_str}")
 
-    # 9. 保存
+    # 10. 保存
     save_results(final)
 
-    # 10. 更新 DNS
+    # 11. 更新 DNS
     if os.environ.get("CF_API_TOKEN"):
         update_cf_dns(final)
     else:
         print("\n[!] 未配置 CF_API_TOKEN，跳过 DNS 更新")
 
-    # 11. 更新 Worker（如果配置了）
+    # 12. 更新 Worker（如果配置了）
     worker_url = os.environ.get("WORKER_URL")
     worker_token = os.environ.get("WORKER_UPDATE_TOKEN")
     if worker_url and worker_token:
