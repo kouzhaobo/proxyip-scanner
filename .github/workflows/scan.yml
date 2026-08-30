@@ -3,6 +3,9 @@ name: ProxyIP Scanner
 on:
   schedule:
     - cron: '0 * * * *'  # 每小时
+  push:
+    branches:
+      - main
   workflow_dispatch:          # 手动触发
 
 env:
