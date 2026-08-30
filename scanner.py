@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ProxyIP Resolver - 解析多个社区 ProxyIP 域名，聚合可用 IP 更新 DNS
-带多轮复验、质量过滤、地区优先排序、证书验证、IPv6 支持、代理真实测速
+带多轮复验、质量过滤、地区优先排序、证书验证、IPv6 支持、代理真实测速与 CF 官方段过滤
 """
 
 import socket
@@ -12,15 +12,15 @@ import sys
 import os
 import re
 import random
+import ipaddress
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 社区 ProxyIP 域名列表
+# 社区 ProxyIP 域名列表（只保留真实 VPS 反代上游）
 UPSTREAM_DOMAINS = [
-    # CMLiussss 主域名
+    # CMLiussss 主域名与分地区
     "proxyip.cmliussss.net",
-    # CMLiussss 分地区
     "proxyip.hk.cmliussss.net",
     "proxyip.sg.cmliussss.net",
     "proxyip.jp.cmliussss.net",
@@ -38,64 +38,74 @@ UPSTREAM_DOMAINS = [
     "proxyip.lv.cmliussss.net",
     "proxyip.us.cmliussss.net",
     "proxyip.ca.cmliussss.net",
+    "proxyip.oracle.cmliussss.net",
+    "proxyip.digitalocean.cmliussss.net",
+    "proxyip.vultr.cmliussss.net",
+    "proxyip.multacom.cmliussss.net",
     # William
     "kr.william.us.ci",
     "tw.william.us.ci",
-    # 新源堂
-    "proxy.xinyitang.dpdns.org",
-    # superhumanvssuperopen
-    "proxy.superhumanvssuperopen.dpdns.org",
     # 备用
     "proxyip.hw.090227.xyz",
     "cdn.xn--b6gac.eu.org",
-    "cdn-all.edtunnel.ml",
 ]
 
 # IPv6 专用上游域名
 UPSTREAM_DOMAINS_V6 = [
-    # 新源堂 IPv6
-    "sub.xinyitang.dpdns.org",
-    # superhumanvssuperopen IPv6
-    "proxyip-v6.superhumanvssuperopen.dpdns.org",
-    "ipv6.superhumanvssuperopen.dpdns.org",
-    "v6.superhumanvssuperopen.dpdns.org",
-    # CMLiussss IPv6
     "ipv6.proxyip.cmliussss.net",
     "v6.proxyip.cmliussss.net",
-    # Cloudflare Pages IPv6
-    "ipv6.pages.dev",
-    "v6.pages.dev",
-    # 其他 IPv6
     "proxyip-v6.hw.090227.xyz",
     "ipv6.proxyip.hw.090227.xyz",
     "v6.proxyip.hw.090227.xyz",
-]
-
-# ── API 数据源（来自 Senflare-IP 等社区项目）──
-API_SOURCES = [
-    # 麒麟 (Kirin)
-    "https://api.uouin.com/cloudflare.html",
-    "https://api.urlce.com/cloudflare.html",
-    # Hostmonit
-    "https://addressesapi.090227.xyz/CloudFlareYes",
-    "https://cf.090227.xyz/CloudFlareYes",
-    # VPS789
-    "https://vps789.com/openApi/cfIpTop20",
-    "https://vps789.com/openApi/cfIpApi",
-    # WeTest
-    "https://www.wetest.vip/page/cloudflare/total_v4.html",
-    # CMLiussss 分运营商
-    "https://cf.090227.xyz/cmcc",   # 中国移动
-    "https://cf.090227.xyz/ct",     # 中国电信
-    # IPDB
-    "https://ipdb.api.030101.xyz/?type=bestcf",
-    "https://ipdb.api.030101.xyz/?type=bestproxy",
 ]
 
 # 排除私有 / 保留网段 IP
 PRIVATE_IP_REGEX = re.compile(
     r'^(?:127\.|10\.|172\.(?:1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|0\.|169\.254\.)'
 )
+
+# Cloudflare 官方 CDN / Anycast IP 网段（严格剔除，防止官方 CDN IP 冒充 ProxyIP）
+CF_OFFICIAL_NETS_V4 = [
+    ipaddress.ip_network("173.245.48.0/20"),
+    ipaddress.ip_network("103.21.244.0/22"),
+    ipaddress.ip_network("103.22.200.0/22"),
+    ipaddress.ip_network("103.31.4.0/22"),
+    ipaddress.ip_network("141.101.64.0/18"),
+    ipaddress.ip_network("108.162.192.0/18"),
+    ipaddress.ip_network("190.93.240.0/20"),
+    ipaddress.ip_network("188.114.96.0/20"),
+    ipaddress.ip_network("197.234.240.0/22"),
+    ipaddress.ip_network("198.41.128.0/17"),
+    ipaddress.ip_network("162.158.0.0/15"),
+    ipaddress.ip_network("104.16.0.0/13"),
+    ipaddress.ip_network("104.24.0.0/14"),
+    ipaddress.ip_network("172.64.0.0/13"),
+    ipaddress.ip_network("131.0.72.0/22"),
+]
+
+CF_OFFICIAL_NETS_V6 = [
+    ipaddress.ip_network("2400:cb00::/32"),
+    ipaddress.ip_network("2606:4700::/32"),
+    ipaddress.ip_network("2803:f800::/32"),
+    ipaddress.ip_network("2405:b500::/32"),
+    ipaddress.ip_network("2405:8100::/32"),
+    ipaddress.ip_network("2a06:98c0::/29"),
+    ipaddress.ip_network("2c0f:f248::/32"),
+]
+
+
+def is_cloudflare_official_ip(ip_str):
+    """判断是否为 Cloudflare 自身的官方 CDN 节点 IP"""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.version == 4:
+            return any(ip in net for net in CF_OFFICIAL_NETS_V4)
+        elif ip.version == 6:
+            return any(ip in net for net in CF_OFFICIAL_NETS_V6)
+    except ValueError:
+        pass
+    return False
+
 
 # 配置
 TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "5"))
@@ -107,7 +117,7 @@ VERIFY_ROUNDS = int(os.environ.get("VERIFY_ROUNDS", "3"))
 VERIFY_CANDIDATES = int(os.environ.get("VERIFY_CANDIDATES", "100"))
 
 # 质量过滤阈值
-MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "300"))   # 最大延迟 ms
+MAX_LATENCY = int(os.environ.get("MAX_LATENCY", "500"))   # 最大延迟 ms
 
 # 证书验证模式 (strict / none)
 CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
@@ -116,7 +126,7 @@ CERT_VERIFY_MODE = os.environ.get("CERT_VERIFY_MODE", "strict")
 ENABLE_IPV6 = os.environ.get("ENABLE_IPV6", "false").lower() == "true"
 
 # 测速配置
-ENABLE_SPEED_TEST = os.environ.get("ENABLE_SPEED_TEST", "true").lower() == "true"
+ENABLE_SPEED_TEST = os.environ.get("ENABLE_SPEED_TEST", "false").lower() == "true"
 SPEED_TEST_HOST = os.environ.get("SPEED_TEST_HOST", "speed.cloudflare.com")
 SPEED_TEST_TIMEOUT = int(os.environ.get("SPEED_TEST_TIMEOUT", "5"))  # 秒
 MIN_DOWNLOAD_SPEED = float(os.environ.get("MIN_DOWNLOAD_SPEED", "10"))  # Mbps
@@ -126,18 +136,20 @@ PRIORITY_REGIONS = ["HK", "MO", "TW", "JP", "SG", "DE", "GB", "US"]
 
 
 def resolve_domain(domain):
-    """解析域名获取所有 IP（支持 IPv4 和 IPv6）"""
+    """解析域名获取所有 IP（排除私有网段与 CF 官方段）"""
     ips = {"ipv4": [], "ipv6": []}
     try:
         results = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
-        ips["ipv4"] = list(set(str(r[4][0]) for r in results if not PRIVATE_IP_REGEX.match(str(r[4][0]))))
+        v4_candidates = set(str(r[4][0]) for r in results if not PRIVATE_IP_REGEX.match(str(r[4][0])))
+        ips["ipv4"] = [ip for ip in v4_candidates if not is_cloudflare_official_ip(ip)]
     except Exception:
         pass
     
     if ENABLE_IPV6:
         try:
             results = socket.getaddrinfo(domain, 443, socket.AF_INET6, socket.SOCK_STREAM)
-            ips["ipv6"] = list(set(str(r[4][0]) for r in results))
+            v6_candidates = set(str(r[4][0]) for r in results)
+            ips["ipv6"] = [ip for ip in v6_candidates if not is_cloudflare_official_ip(ip)]
         except Exception:
             pass
     
@@ -145,7 +157,7 @@ def resolve_domain(domain):
 
 
 def check_cert_matches_domain(tls_sock, expected_host):
-    """检查 TLS 证书 SAN/CN 是否匹配预期域名（纯 Python 解析，零子进程开销）"""
+    """检查 TLS 证书 SAN/CN 是否匹配预期域名"""
     try:
         cert = tls_sock.getpeercert()
         if not cert:
@@ -296,7 +308,7 @@ def test_proxyip(ip, port=443, ipv6=False):
         if "error 1034" in headers or "边缘ip受限" in headers:
             return None
 
-        # 检查 HTTP 异常状态码 (403/400 及 Cloudflare 5xx 错误)
+        # 检查 HTTP 异常状态码 (400, 403 及 Cloudflare 5xx 错误)
         status_line = headers.split("\r\n")[0] if "\r\n" in headers else headers
         if any(f" {code} " in status_line for code in (400, 403, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526)):
             return None
@@ -336,50 +348,12 @@ def resolve_all_upstreams():
                     print(f"  [+] {domain} -> IPv6: {len(ips['ipv6'])} 个")
                     all_ips["ipv6"].update(ips["ipv6"])
                 if not ips["ipv4"] and not ips["ipv6"]:
-                    print(f"  [-] {domain} -> 解析无结果")
+                    print(f"  [-] {domain} -> 解析无结果或全部为 CF 官方节点")
             except Exception as e:
                 print(f"  [-] {domain} -> 解析出错: {e}")
     
     total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
-    print(f"\n[*] 共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
-    return all_ips
-
-
-def collect_from_apis():
-    """从社区 API 数据源采集 CF IP（纯 stdlib，带私有网段过滤）"""
-    print("\n[*] 从 API 数据源采集 CF IP...")
-    all_ips = {"ipv4": set(), "ipv6": set()}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,*/*",
-    }
-    for url in API_SOURCES:
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                text = resp.read().decode("utf-8", errors="ignore")
-            
-            ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', text)
-            valid = [ip for ip in ips if all(0 <= int(p) <= 255 for p in ip.split('.')) and not PRIVATE_IP_REGEX.match(ip)]
-            
-            if not valid:
-                for line in text.strip().split('\n'):
-                    line = line.strip()
-                    if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', line):
-                        if all(0 <= int(p) <= 255 for p in line.split('.')) and not PRIVATE_IP_REGEX.match(line):
-                            valid.append(line)
-            
-            v6s = re.findall(r'(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{1,4}', text)
-            before = len(all_ips["ipv4"])
-            all_ips["ipv4"].update(valid)
-            all_ips["ipv6"].update(v6s)
-            new = len(all_ips["ipv4"]) - before
-            print(f"  [+] {url.split('/')[2]} -> IPv4: {new} 新 / {len(valid)} 总")
-            time.sleep(0.1)
-        except Exception as e:
-            print(f"  [-] {url.split('/')[2]} -> 失败: {e}")
-    total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
-    print(f"[*] API 源共获取 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
+    print(f"\n[*] 共获取 {total} 个去重真实 VPS ProxyIP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
     return all_ips
 
 
@@ -464,6 +438,7 @@ def verify_candidates(candidates):
 
 
 GEO_CACHE = {}
+
 
 def get_geo_info(ip):
     """获取 IP 地理位置"""
@@ -613,7 +588,7 @@ def save_results(results):
 
 def main():
     print("=" * 60)
-    print("  ProxyIP Resolver - 高效极速版（含真实下载测速、纯 Python 证书验证、GeoIP 控频）")
+    print("  ProxyIP Resolver - 纯净 VPS 版（已过滤 CF 官方段，防假 ProxyIP 污染）")
     print(f"  {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
     print(f"  配置: top {VERIFY_CANDIDATES} 候选, {VERIFY_ROUNDS} 轮复验")
     print(f"  保留: IPv4 {MAX_RESULTS_V4} 个, IPv6 {MAX_RESULTS_V6} 个")
@@ -626,18 +601,11 @@ def main():
     print(f"  优先地区: {', '.join(PRIORITY_REGIONS)}")
     print("=" * 60)
 
-    # 1. 解析所有上游域名
+    # 1. 解析所有上游域名并过滤 CF 自身网段
     all_ips = resolve_all_upstreams()
 
-    # 1.5. 从 API 数据源采集更多 IP
-    api_ips = collect_from_apis()
-    all_ips["ipv4"].update(api_ips["ipv4"])
-    all_ips["ipv6"].update(api_ips["ipv6"])
-    total = len(all_ips["ipv4"]) + len(all_ips["ipv6"])
-    print(f"\n[*] 合并后共 {total} 个去重 IP (IPv4: {len(all_ips['ipv4'])}, IPv6: {len(all_ips['ipv6'])})")
-
     if not all_ips["ipv4"] and not all_ips["ipv6"]:
-        print("[!] 未获取到任何 IP，退出")
+        print("[!] 未获取到任何可用 VPS IP，退出")
         sys.exit(1)
 
     # 2. 初筛：单次测试，选出候选
@@ -659,7 +627,7 @@ def main():
         print("[!] 质量过滤后无可用 IP，放宽标准使用全部")
         filtered = verified
 
-    # 5. 针对高质量前 N 个候选 IP 做真实 ProxyIP 下载测速
+    # 5. 针对高质量前 N 个候选 IP 做真实 ProxyIP 下载测速（可选）
     if ENABLE_SPEED_TEST:
         test_candidates = filtered[:30]
         print(f"\n[*] 开始对 top {len(test_candidates)} 候选 IP 做 ProxyIP 实际代理下载测速 (目标 >= {MIN_DOWNLOAD_SPEED}Mbps)...")
@@ -680,7 +648,6 @@ def main():
         speed_filtered = [r for r in speed_tested if r.get("speed") and r["speed"] >= MIN_DOWNLOAD_SPEED]
         if speed_filtered:
             print(f"[*] 速度过滤: {len(test_candidates)} -> {len(speed_filtered)} (速度>={MIN_DOWNLOAD_SPEED}Mbps)")
-            # 补全后续不需要测速的优秀 IP 备用
             remaining = [r for r in filtered if r not in test_candidates]
             filtered = speed_filtered + remaining
         elif speed_tested:
@@ -690,7 +657,7 @@ def main():
         else:
             print("[!] 测速未完成或接口限制，保留基于延迟的可用 IP")
 
-    # 6. 只对最终选出的前 N 个候选 IP 获取地理位置（精细风控，防止触发 API 限流）
+    # 6. 只对最终选出的前 N 个候选 IP 获取地理位置
     top_candidates = filtered[:(MAX_RESULTS_V4 + MAX_RESULTS_V6)]
     print(f"\n[*] 并发获取 {len(top_candidates)} 个精选 IP 的地理位置...")
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -715,15 +682,16 @@ def main():
     final = final_v4 + final_v6
 
     # 9. 打印最终结果
-    print(f"\n[*] 最终 {len(final)} 个 IP (IPv4: {len(final_v4)}, IPv6: {len(final_v6)}):")
+    print(f"\n[*] 最终 {len(final)} 个真实 VPS ProxyIP (IPv4: {len(final_v4)}, IPv6: {len(final_v6)}):")
     for i, r in enumerate(final):
         geo = r.get("geo", {})
         country_code = geo.get("countryCode", "??")
         city = geo.get("city", "Unknown")
+        isp = geo.get("isp", "Unknown")
         priority_mark = "★" if country_code in PRIORITY_REGIONS else " "
         ipv6_mark = " (IPv6)" if r.get("ipv6") else ""
         speed_str = f" speed {r['speed']}Mbps" if r.get("speed") else ""
-        print(f"    {priority_mark} {r['ip']}{ipv6_mark} - {country_code} {city} - avg {r['avg_latency']}ms jitter {r['jitter']}ms{speed_str}")
+        print(f"    {priority_mark} {r['ip']}{ipv6_mark} - {country_code} {city} ({isp}) - avg {r['avg_latency']}ms jitter {r['jitter']}ms{speed_str}")
 
     # 10. 保存
     save_results(final)
