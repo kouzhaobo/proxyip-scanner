@@ -1,80 +1,54 @@
 # ProxyIP Resolver
 
-从多个社区 ProxyIP 域名聚合可用 IP，自动更新到你的域名 DNS。
+从多个社区 ProxyIP 域名聚合可用 IP，自动测试可用性并更新到指定的 Cloudflare DNS。
 
 ## 功能特性
 
-- ✅ **证书验证** — 验证 SSL 证书有效性，修复"此网站不安全"问题
-- ✅ **IPv6 支持** — 同时扫描 IPv4 和 IPv6 地址
-- ✅ **测速功能** — 测试下载速度，过滤低速 IP
-- ✅ **多轮复验** — 3 轮测试，淘汰不稳定 IP
-- ✅ **地区优先** — 8 个优先地区智能排序
-- ✅ **自动更新** — 自动更新 Cloudflare DNS
+- ✅ **证书与风控校验** — 自动校验 TLS 证书，检测 Cloudflare 人机验证及 1034 错误
+- ✅ **官方 CIDR 过滤** — 自动剔除 Cloudflare 官方 CDN 节点，确保提取的均为真实 VPS 反代
+- ✅ **IPv6 / IPv4 双栈** — 支持分别配置 IPv4 与 IPv6 候选数量
+- ✅ **多轮复验** — 3 轮并发测试，淘汰抖动与不稳定 IP
+- ✅ **地区优先排序** — 结合 GeoIP 对亚太及欧美优先地区进行智能排序
+- ✅ **自动更新 DNS** — 自动同步更新 Cloudflare DNS 的 A / AAAA 记录
 
 ## 工作原理
 
 ```
-25+ 个社区 ProxyIP 域名（分地区）
-    ↓ DoH 解析获取 IPv4/IPv6 IP
-    所有 IP 去重 (上百个)
-    ↓ 并行测试可用性 + 测速
-    可用 IP 按延迟/速度排序
-    ↓ IPv4 取 20 个，IPv6 取 30 个
-    写入 proxyip.zhaobo.org 的 A/AAAA 记录 (灰色云朵)
+社区 ProxyIP 域名列表
+    ↓ DNS 解析提取全部 VPS IP (排除私有网段与 CF 官方段)
+    ↓ 并行可用性测试 + 人机风控检测 + 多轮复验
+    ↓ 按地区优先级与平均延迟排序
+    写入自定义域名的 A/AAAA 记录 (灰色云朵 / DNS-only)
 ```
-
-## 上游域名（25+ 个）
-
-**CMLiussss 分地区：**
-HK / SG / JP / KR / IN / GB / FR / DE / NL / SE / FI / PL / RU / CH / LV / US / CA
-
-**其他社区：**
-- `kr.william.us.ci` / `tw.william.us.ci`
-- `proxy.xinyitang.dpdns.org`
-- `cdn.xn--b6gac.eu.org` / `cdn-all.edtunnel.ml`
 
 ## 使用
 
-edgetunnel 的 `PROXYIP` 环境变量填：`proxyip.zhaobo.org`
+在代理项目（如 edgetunnel）的 `PROXYIP` 环境变量中填写你配置的自定义解析域名（例如 `proxyip.yourdomain.com`）。
 
-## 配置
+## 配置说明
 
-GitHub Secrets：
+在 GitHub 仓库的 **Settings -> Secrets and variables -> Actions** 中配置以下 Secrets：
 
 | Secret | 说明 |
 |--------|------|
-| `CF_API_TOKEN` | Cloudflare 全局 API Key |
-| `CF_ZONE_ID` | Zone ID |
-| `CF_DOMAIN` | 域名 |
-| `CF_RECORD_NAME` | DNS 记录名 |
-| `CF_EMAIL` | CF 账户邮箱 |
+| `CF_API_TOKEN` | Cloudflare Global API Key 或具备 DNS 编辑权限的 Token |
+| `CF_ZONE_ID` | 目标域名的 Zone ID |
+| `CF_DOMAIN` | 根域名（例如 `example.com`） |
+| `CF_RECORD_NAME` | 子域名记录名前缀（例如 `proxyip`） |
+| `CF_EMAIL` | Cloudflare 账户邮箱（使用 Global API Key 时必需） |
 
-## 环境变量
+## 环境变量说明
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `CERT_VERIFY_MODE` | `strict` | 证书验证模式（strict/none） |
-| `ENABLE_IPV6` | `true` | 启用 IPv6 支持 |
-| `ENABLE_SPEED_TEST` | `true` | 启用测速功能 |
-| `SPEED_TEST_URL` | `https://speed.cloudflare.com/__down?bytes=10485760` | 测速文件 URL |
-| `SPEED_TEST_TIMEOUT` | `30` | 测速超时（秒） |
-| `MIN_DOWNLOAD_SPEED` | `10` | 最低下载速度（Mbps） |
-| `MAX_LATENCY` | `300` | 最大延迟（ms） |
-| `MAX_RESULTS_V4` | `20` | IPv4 保留数量 |
+| `CERT_VERIFY_MODE` | `strict` | 证书验证模式（`strict` / `none`） |
+| `ENABLE_IPV6` | `false` | 是否启用 IPv6 扫描 |
+| `MAX_LATENCY` | `500` | 最大允许延迟（ms） |
+| `MAX_RESULTS_V4` | `30` | IPv4 保留数量 |
 | `MAX_RESULTS_V6` | `30` | IPv6 保留数量 |
 | `VERIFY_ROUNDS` | `3` | 复验轮数 |
-| `TEST_DOMAINS` | CF 官方站点 | 自定义测试域名（逗号分隔） |
+| `SCAN_THREADS` | `100` | 并发测试线程数 |
 
-## 调度
+## 调度机制
 
-每 12 小时自动运行（GitHub Actions），也可手动触发。
-
-## 输出示例
-
-```
-[*] 最终 50 个 IP (IPv4: 20, IPv6: 30):
-    ★ 49.238.236.28 - JP Tokyo - avg 33ms jitter 5ms speed 150.5Mbps
-    ★ 150.136.254.79 - US San Jose - avg 117ms jitter 12ms speed 85.2Mbps
-    ★ 2606:4700::1 (IPv6) - US San Francisco - avg 45ms jitter 8ms speed 120.3Mbps
-    ...
-```
+通过 GitHub Actions 每小时定时自动运行，也支持在 Actions 页面手动触发执行。
